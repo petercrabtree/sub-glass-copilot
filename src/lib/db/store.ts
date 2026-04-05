@@ -189,7 +189,7 @@ export async function getAllMedia(): Promise<MediaGroup[]> {
 // Events
 export async function addEvent(event: Omit<SignalEvent, 'id'>): Promise<void> {
   const db = await getDB();
-  const id = `${event.ts}_${Math.random().toString(36).slice(2, 9)}`;
+  const id = `${event.ts}_${crypto.randomUUID()}`;
   await db.put('events', { ...event, id });
 }
 

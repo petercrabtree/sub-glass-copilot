@@ -29,7 +29,7 @@ function extractMediaGroup(postData: Record<string, unknown>, postId: string): M
   if (galleryData && mediaMetadata) {
     const galleryItems = (galleryData.items as Array<Record<string, unknown>>) || [];
     const items: MediaItem[] = galleryItems
-      .map((gi) => {
+      .map((gi): MediaItem | null => {
         const mediaId = gi.media_id as string;
         const meta = mediaMetadata[mediaId];
         if (!meta) return null;
