@@ -168,9 +168,9 @@
   async function rateUp() {
     if (!currentPost) return;
     const existing = await getPost(currentPost.id);
-    const newRating = existing?.localRating === 1 ? undefined : (1 as 1);
-    await setPostRating(currentPost.id, newRating as 1 | -1 | undefined);
-    posts = posts.map(p => p.id === currentPost.id ? { ...p, localRating: newRating as 1 | -1 | undefined } : p);
+    const newRating: 1 | undefined = existing?.localRating === 1 ? undefined : 1;
+    await setPostRating(currentPost.id, newRating);
+    posts = posts.map(p => p.id === currentPost.id ? { ...p, localRating: newRating } : p);
     await recordEvent('rating_explicit', currentPost);
     if (newRating === 1) await updateSubredditRating(currentPost.subreddit, 1);
     else if (existing?.localRating === 1) await updateSubredditRating(currentPost.subreddit, -1);
@@ -179,9 +179,9 @@
   async function rateDown() {
     if (!currentPost) return;
     const existing = await getPost(currentPost.id);
-    const newRating = existing?.localRating === -1 ? undefined : (-1 as -1);
-    await setPostRating(currentPost.id, newRating as 1 | -1 | undefined);
-    posts = posts.map(p => p.id === currentPost.id ? { ...p, localRating: newRating as 1 | -1 | undefined } : p);
+    const newRating: -1 | undefined = existing?.localRating === -1 ? undefined : -1;
+    await setPostRating(currentPost.id, newRating);
+    posts = posts.map(p => p.id === currentPost.id ? { ...p, localRating: newRating } : p);
     await recordEvent('rating_explicit', currentPost);
     if (newRating === -1) await updateSubredditRating(currentPost.subreddit, -1);
     else if (existing?.localRating === -1) await updateSubredditRating(currentPost.subreddit, 1);

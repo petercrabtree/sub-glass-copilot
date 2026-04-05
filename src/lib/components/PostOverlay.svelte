@@ -30,7 +30,7 @@
   } = $props();
 
   let showInfo = $state(true);
-  let hideTimer: ReturnType<typeof setTimeout>;
+  let hideTimer = $state<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   $effect(() => {
     // Reset timer whenever post changes
