@@ -12,6 +12,23 @@ const DEFAULT_ITERATIONS = 1;
 const DEFAULT_INTERVAL_MS = 5000;
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_VIEWPORT = { width: 1440, height: 1024, deviceScaleFactor: 1 };
+const CHROME_VERSION = '146.0.7680.178';
+const DESKTOP_USER_AGENT =
+  `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ` +
+  `(KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`;
+const USER_AGENT_METADATA = {
+  platform: 'macOS',
+  platformVersion: '15.0.0',
+  architecture: 'x86',
+  model: '',
+  mobile: false,
+  fullVersion: CHROME_VERSION,
+  brands: [
+    { brand: 'Google Chrome', version: '146' },
+    { brand: 'Chromium', version: '146' },
+    { brand: 'Not.A/Brand', version: '24' }
+  ]
+};
 
 const CHROME_CANDIDATES = [
   process.env.CHROME_BIN,
@@ -150,10 +167,13 @@ async function main() {
 
 async function captureRoute(route, iterationDir) {
   const page = await browser.newPage();
+  await configurePage(page);
   const routePrefix = path.join(iterationDir, route.name);
   const consoleMessages = [];
   const pageErrors = [];
   const failedRequests = [];
+  const requestLog = [];
+  const responseLog = [];
   const startedAt = new Date().toISOString();
 
   page.on('console', (message) => {
@@ -173,6 +193,24 @@ async function captureRoute(route, iterationDir) {
       method: request.method(),
       url: request.url(),
       errorText: request.failure()?.errorText ?? 'unknown'
+    });
+  });
+
+  page.on('request', (request) => {
+    if (!request.url().includes('old.reddit.com')) return;
+    requestLog.push({
+      method: request.method(),
+      url: request.url(),
+      headers: request.headers()
+    });
+  });
+
+  page.on('response', async (response) => {
+    if (!response.url().includes('old.reddit.com')) return;
+    responseLog.push({
+      url: response.url(),
+      status: response.status(),
+      headers: response.headers()
     });
   });
 
@@ -197,7 +235,9 @@ async function captureRoute(route, iterationDir) {
       durationMs: new Date(finishedAt).getTime() - new Date(startedAt).getTime(),
       consoleMessages,
       pageErrors,
-      failedRequests
+      failedRequests,
+      requestLog,
+      responseLog
     };
 
     routeResult.ok =
@@ -218,7 +258,9 @@ async function captureRoute(route, iterationDir) {
       error: serializeError(error),
       consoleMessages,
       pageErrors,
-      failedRequests
+      failedRequests,
+      requestLog,
+      responseLog
     };
 
     try {
@@ -422,8 +464,22 @@ async function waitForOptionalSelector(page, selector, timeout) {
   }
 }
 
+async function configurePage(page) {
+  const client = await page.createCDPSession();
+  await client.send('Network.enable');
+  await client.send('Network.setUserAgentOverride', {
+    userAgent: DESKTOP_USER_AGENT,
+    acceptLanguage: 'en-US,en;q=0.9',
+    platform: 'macOS',
+    userAgentMetadata: USER_AGENT_METADATA
+  });
+  await page.setExtraHTTPHeaders({
+    'accept-language': 'en-US,en;q=0.9'
+  });
+}
+
 function startDevServer(hostValue, portValue) {
-  const child = spawn('npm', ['run', 'dev', '--', '--host', hostValue, '--port', String(portValue)], {
+  const child = spawn('bun', ['run', 'dev', '--host', hostValue, '--port', String(portValue)], {
     cwd: process.cwd(),
     env: { ...process.env, BROWSER: 'none' },
     stdio: ['ignore', 'pipe', 'pipe']

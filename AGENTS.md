@@ -12,3 +12,4 @@
 - Dev diagnostics matter in this repo: `src/lib/dev/error-reporter.ts` forwards browser `console.error`, `window.error`, and `unhandledrejection` events to the Vite dev server endpoint defined in `vite.config.ts`. Avoid removing or bypassing that workflow casually.
 - Adjacency/discovery behavior depends on extracting `r/...` mentions and crosspost relationships into local graph edges in `src/lib/adjacency/extract.ts`; if discovery seems off, inspect extraction and local data before changing ranking.
 - Use Bun for the default workflow (`bun install`, `bun run dev`, `bun run check`, `bun run build`). `bun run check` is the main validation command, and there is currently no dedicated automated test suite.
+- When adding or updating dependencies, prefer `bun add`, `bun add -d`, `bun remove`, and `bun install` so `bun.lock` stays authoritative. Avoid `npm install` in normal repo work unless the user explicitly asks for npm.
