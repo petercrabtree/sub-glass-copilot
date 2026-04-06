@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Mock city skyline</title>
+  <desc id="desc">Night skyline with glowing windows and reflections.</desc>
+  <defs>
+    <linearGradient id="night" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#071528"/>
+      <stop offset="100%" stop-color="#18405b"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#night)"/>
+  <rect y="670" width="1600" height="230" fill="#0a1c2d"/>
+  <g fill="#132a42">
+    <rect x="120" y="330" width="180" height="340"/>
+    <rect x="290" y="250" width="150" height="420"/>
+    <rect x="430" y="380" width="160" height="290"/>
+    <rect x="600" y="220" width="210" height="450"/>
+    <rect x="840" y="310" width="170" height="360"/>
+    <rect x="1020" y="190" width="210" height="480"/>
+    <rect x="1250" y="360" width="110" height="310"/>
+  </g>
+  <g fill="#ffe58d">
+    <rect x="152" y="368" width="24" height="32"/>
+    <rect x="200" y="430" width="24" height="32"/>
+    <rect x="248" y="514" width="24" height="32"/>
+    <rect x="330" y="296" width="24" height="32"/>
+    <rect x="378" y="376" width="24" height="32"/>
+    <rect x="472" y="434" width="24" height="32"/>
+    <rect x="648" y="266" width="24" height="32"/>
+    <rect x="706" y="352" width="24" height="32"/>
+    <rect x="752" y="432" width="24" height="32"/>
+    <rect x="880" y="360" width="24" height="32"/>
+    <rect x="932" y="446" width="24" height="32"/>
+    <rect x="1072" y="238" width="24" height="32"/>
+    <rect x="1126" y="322" width="24" height="32"/>
+    <rect x="1178" y="404" width="24" height="32"/>
+    <rect x="1282" y="408" width="24" height="32"/>
+  </g>
+  <text x="92" y="118" fill="#eef7ff" font-size="52" font-family="Georgia, serif">Mock next-post image</text>
+</svg>

@@ -13,3 +13,4 @@
 - Adjacency/discovery behavior depends on extracting `r/...` mentions and crosspost relationships into local graph edges in `src/lib/adjacency/extract.ts`; if discovery seems off, inspect extraction and local data before changing ranking.
 - Use Bun for the default workflow (`bun install`, `bun run dev`, `bun run check`, `bun run build`). `bun run check` is the main validation command, and there is currently no dedicated automated test suite.
 - When adding or updating dependencies, prefer `bun add`, `bun add -d`, `bun remove`, and `bun install` so `bun.lock` stays authoritative. Avoid `npm install` in normal repo work unless the user explicitly asks for npm.
+- The headless smoke workflow is meant to avoid live Reddit traffic by default. `scripts/headless-smoke.mjs` starts Vite with `VITE_SUBGLASS_REDDIT_BASE_URL=/__mock/reddit`, and `vite.config.ts` serves local Reddit-shaped fixtures from `dev/mock-reddit-fixtures.ts`.

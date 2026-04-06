@@ -1,5 +1,7 @@
 import type { PostRecord, MediaGroup, MediaItem } from '$lib/types';
 
+const IMAGE_URL_PATTERN = /\.(jpg|jpeg|png|gif|webp|svg)(\?.*)?$/i;
+
 function extractMediaGroup(postData: Record<string, unknown>, postId: string): MediaGroup | undefined {
   const url = postData.url as string || '';
   const domain = postData.domain as string || '';
@@ -52,7 +54,7 @@ function extractMediaGroup(postData: Record<string, unknown>, postId: string): M
   }
 
   // Reddit-hosted image
-  if (domain === 'i.redd.it' || url.match(/\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i)) {
+  if (domain === 'i.redd.it' || IMAGE_URL_PATTERN.test(url)) {
     return {
       id: `img_${postId}`,
       kind: 'image',
@@ -77,7 +79,7 @@ function extractMediaGroup(postData: Record<string, unknown>, postId: string): M
   }
 
   // External image (best-effort)
-  if (url.match(/\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i)) {
+  if (IMAGE_URL_PATTERN.test(url)) {
     return {
       id: `ext_img_${postId}`,
       kind: 'external_image',

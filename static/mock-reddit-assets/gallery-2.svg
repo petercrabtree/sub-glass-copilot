@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Mock gallery panel two</title>
+  <desc id="desc">Concentric orbit rings over a warm dusk palette.</desc>
+  <defs>
+    <linearGradient id="orbit" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2b1636"/>
+      <stop offset="100%" stop-color="#d06c43"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#orbit)"/>
+  <g fill="none" stroke="#ffe3c4" opacity="0.85">
+    <ellipse cx="820" cy="470" rx="520" ry="220" stroke-width="6"/>
+    <ellipse cx="820" cy="470" rx="390" ry="158" stroke-width="5"/>
+    <ellipse cx="820" cy="470" rx="260" ry="98" stroke-width="4"/>
+    <ellipse cx="820" cy="470" rx="138" ry="48" stroke-width="3"/>
+  </g>
+  <g fill="#fff0da">
+    <circle cx="502" cy="588" r="18"/>
+    <circle cx="978" cy="352" r="14"/>
+    <circle cx="1184" cy="472" r="12"/>
+    <circle cx="740" cy="438" r="24"/>
+  </g>
+  <text x="92" y="118" fill="#fff8ef" font-size="52" font-family="Georgia, serif">Gallery panel 2</text>
+</svg>

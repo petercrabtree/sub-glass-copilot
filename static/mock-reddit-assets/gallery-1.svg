@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Mock gallery panel one</title>
+  <desc id="desc">Abstract atlas lines over a cool gradient.</desc>
+  <defs>
+    <linearGradient id="panel" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f203d"/>
+      <stop offset="100%" stop-color="#2f8f83"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#panel)"/>
+  <g fill="none" stroke="#d8fff3" stroke-width="5" opacity="0.72">
+    <path d="M130 190 C430 80 700 120 920 236 C1132 346 1362 324 1470 188"/>
+    <path d="M118 360 C372 268 612 290 812 370 C1044 464 1286 472 1494 392"/>
+    <path d="M108 530 C346 474 560 492 770 560 C1012 638 1244 640 1500 586"/>
+    <path d="M100 700 C324 664 520 662 716 712 C968 774 1204 774 1498 724"/>
+  </g>
+  <g fill="#d8fff3" opacity="0.88">
+    <circle cx="318" cy="238" r="12"/>
+    <circle cx="710" cy="330" r="12"/>
+    <circle cx="1170" cy="610" r="12"/>
+    <circle cx="1340" cy="310" r="12"/>
+  </g>
+  <text x="92" y="118" fill="#f4fffc" font-size="52" font-family="Georgia, serif">Gallery panel 1</text>
+</svg>

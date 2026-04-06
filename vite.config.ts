@@ -1,6 +1,7 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 import type { Plugin } from 'vite';
+import { mockRedditFixtures } from './dev/mock-reddit-fixtures';
 
 type DevErrorReport = {
   source: 'console.error' | 'window.error' | 'window.unhandledrejection';
@@ -25,6 +26,7 @@ type StreamingResponse = {
   statusCode: number;
   end(body?: string): void;
   writableEnded?: boolean;
+  setHeader?(name: string, value: string): void;
 };
 
 type NextFunction = (err?: unknown) => void;
@@ -126,6 +128,35 @@ function browserErrorBridgePlugin(): Plugin {
   };
 }
 
+function mockRedditProxyPlugin(): Plugin {
+  return {
+    name: 'subglass-mock-reddit-proxy',
+    apply: 'serve',
+    configureServer(server) {
+      server.config.logger.info(
+        '[subglass-dev] Serving local mock Reddit fixtures via /__mock/reddit'
+      );
+
+      server.middlewares.use('/__mock/reddit', ((req: StreamingRequest & { url?: string }, res: StreamingResponse, next: NextFunction) => {
+        const requestUrl = req.url ? new URL(req.url, 'http://localhost') : null;
+        const pathname = requestUrl?.pathname || '/';
+        const fixture = mockRedditFixtures[pathname];
+
+        if (!fixture) {
+          next();
+          return;
+        }
+
+        res.statusCode = 200;
+        res.setHeader?.('content-type', 'application/json; charset=utf-8');
+        res.setHeader?.('cache-control', 'no-store');
+        res.setHeader?.('access-control-allow-origin', '*');
+        res.end(JSON.stringify(fixture, null, 2));
+      }) as never);
+    }
+  };
+}
+
 export default defineConfig({
-  plugins: [browserErrorBridgePlugin(), sveltekit()]
+  plugins: [mockRedditProxyPlugin(), browserErrorBridgePlugin(), sveltekit()]
 });

@@ -51,6 +51,11 @@ export interface RedditDebugState {
 const BASE = 'https://old.reddit.com';
 const DEBUG_STORAGE_KEY = 'subglass:reddit-debug';
 
+function getBaseUrl(): string {
+  const configuredBase = import.meta.env.VITE_SUBGLASS_REDDIT_BASE_URL as string | undefined;
+  return configuredBase?.replace(/\/+$/, '') || BASE;
+}
+
 function withJsonPath(path: string): string {
   if (path.endsWith('/.json') || path.endsWith('.json')) return path;
   if (path.endsWith('/')) return `${path}.json`;
@@ -164,7 +169,7 @@ function buildListingUrl(spec: FetchSpec, limit = 25): string {
   if (spec.after) params.set('after', spec.after);
   if (spec.time) params.set('t', spec.time);
   if (spec.query) params.set('q', spec.query);
-  return `${BASE}${path}?${params.toString()}`;
+  return `${getBaseUrl()}${path}?${params.toString()}`;
 }
 
 export async function fetchListing(spec: FetchSpec, limit = 25): Promise<RedditListingResult> {
@@ -216,7 +221,7 @@ export async function fetchListing(spec: FetchSpec, limit = 25): Promise<RedditL
 export async function fetchSubredditAbout(subreddit: string): Promise<RedditAboutResponse | null> {
   const startedAt = Date.now();
   try {
-    const url = `${BASE}${withJsonPath(`/r/${subreddit}/about`)}?raw_json=1`;
+    const url = `${getBaseUrl()}${withJsonPath(`/r/${subreddit}/about`)}?raw_json=1`;
     const res = await fetch(url, {
       headers: {
         accept: 'application/json'
@@ -244,7 +249,7 @@ export async function fetchSubredditAbout(subreddit: string): Promise<RedditAbou
 export async function fetchSubredditSidebar(subreddit: string): Promise<string | null> {
   const startedAt = Date.now();
   try {
-    const url = `${BASE}${withJsonPath(`/r/${subreddit}/about`)}?raw_json=1`;
+    const url = `${getBaseUrl()}${withJsonPath(`/r/${subreddit}/about`)}?raw_json=1`;
     const res = await fetch(url, {
       headers: {
         accept: 'application/json'

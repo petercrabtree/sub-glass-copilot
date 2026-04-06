@@ -11,6 +11,7 @@ const DEFAULT_PORT = 4173;
 const DEFAULT_ITERATIONS = 1;
 const DEFAULT_INTERVAL_MS = 5000;
 const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_REDDIT_BASE_URL = '/__mock/reddit';
 const DEFAULT_VIEWPORT = { width: 1440, height: 1024, deviceScaleFactor: 1 };
 const CHROME_VERSION = '146.0.7680.178';
 const DESKTOP_USER_AGENT =
@@ -49,6 +50,11 @@ const intervalMs = getIntegerArg('--interval-ms', process.env.HEADLESS_SMOKE_INT
 const host = getStringArg('--host', process.env.HEADLESS_SMOKE_HOST, DEFAULT_HOST);
 const port = getIntegerArg('--port', process.env.HEADLESS_SMOKE_PORT, DEFAULT_PORT);
 const baseUrlArg = getStringArg('--base-url', process.env.HEADLESS_SMOKE_BASE_URL, '');
+const redditBaseUrl = getStringArg(
+  '--reddit-base-url',
+  process.env.HEADLESS_SMOKE_REDDIT_BASE_URL,
+  DEFAULT_REDDIT_BASE_URL
+);
 const timeoutMs = getIntegerArg('--timeout-ms', process.env.HEADLESS_SMOKE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
 const baseUrl = baseUrlArg || `http://${host}:${port}`;
 const shouldSpawnServer = !baseUrlArg;
@@ -59,6 +65,7 @@ const summary = {
   runId,
   startedAt: new Date().toISOString(),
   baseUrl,
+  redditBaseUrl,
   shouldSpawnServer,
   loop,
   iterationsRequested: loop ? 'infinite' : iterations,
@@ -87,7 +94,7 @@ async function main() {
   summary.chromePath = chromePath;
 
   if (shouldSpawnServer) {
-    devServer = startDevServer(host, port);
+    devServer = startDevServer(host, port, redditBaseUrl);
     await waitForServer(baseUrl, timeoutMs, devServer);
   }
 
@@ -197,7 +204,7 @@ async function captureRoute(route, iterationDir) {
   });
 
   page.on('request', (request) => {
-    if (!request.url().includes('old.reddit.com')) return;
+    if (!isTrackedRedditUrl(request.url())) return;
     requestLog.push({
       method: request.method(),
       url: request.url(),
@@ -206,11 +213,24 @@ async function captureRoute(route, iterationDir) {
   });
 
   page.on('response', async (response) => {
-    if (!response.url().includes('old.reddit.com')) return;
+    if (!isTrackedRedditUrl(response.url())) return;
+    const headers = response.headers();
+    const contentType = headers['content-type'] || '';
+    let bodyPreview;
+
+    if (contentType.includes('application/json')) {
+      try {
+        bodyPreview = limitString(await response.text(), 2500);
+      } catch {
+        bodyPreview = '[unavailable]';
+      }
+    }
+
     responseLog.push({
       url: response.url(),
       status: response.status(),
-      headers: response.headers()
+      headers,
+      bodyPreview
     });
   });
 
@@ -390,7 +410,10 @@ async function captureAdminRoute(page, route, routePrefix, routeTimeoutMs) {
 }
 
 async function exerciseViewerAdvance(page, routePrefix) {
-  const beforeCounter = await page.locator('.counter').textContent();
+  const beforeCounter = await page.$eval(
+    '.counter',
+    (element) => element.textContent?.trim() ?? null
+  );
   const [currentIndex, totalPosts] = parseCounter(beforeCounter);
   if (!totalPosts || totalPosts <= currentIndex) {
     return {
@@ -401,8 +424,8 @@ async function exerciseViewerAdvance(page, routePrefix) {
   }
 
   try {
-    await page.locator('.overlay').hover();
-    await page.locator('.nav-btn.next').click();
+    await page.hover('.overlay');
+    await page.click('.nav-btn.next');
     await page.waitForFunction(
       (counterText) => document.querySelector('.counter')?.textContent?.trim() !== counterText,
       { timeout: 10000 },
@@ -478,10 +501,14 @@ async function configurePage(page) {
   });
 }
 
-function startDevServer(hostValue, portValue) {
+function startDevServer(hostValue, portValue, redditBaseUrlValue) {
   const child = spawn('bun', ['run', 'dev', '--host', hostValue, '--port', String(portValue)], {
     cwd: process.cwd(),
-    env: { ...process.env, BROWSER: 'none' },
+    env: {
+      ...process.env,
+      BROWSER: 'none',
+      VITE_SUBGLASS_REDDIT_BASE_URL: redditBaseUrlValue
+    },
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
@@ -494,6 +521,10 @@ function startDevServer(hostValue, portValue) {
   });
 
   return child;
+}
+
+function isTrackedRedditUrl(url) {
+  return url.includes('/__mock/reddit/') || url.includes('old.reddit.com/');
 }
 
 async function waitForServer(url, timeout, child) {
@@ -551,6 +582,10 @@ function serializeError(error) {
   }
 
   return { message: String(error) };
+}
+
+function limitString(value, maxLength) {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
 }
 
 async function persistSummary() {

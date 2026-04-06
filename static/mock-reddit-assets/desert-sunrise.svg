@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Mock desert sunrise</title>
+  <desc id="desc">Warm gradient sunrise over layered desert ridges.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1f355e"/>
+      <stop offset="55%" stop-color="#f28b50"/>
+      <stop offset="100%" stop-color="#f6d4a2"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#sky)"/>
+  <circle cx="1180" cy="220" r="92" fill="#fff2c2" opacity="0.95"/>
+  <path d="M0 690 C220 610 420 640 620 560 C860 470 1070 520 1240 460 C1390 405 1490 390 1600 410 L1600 900 L0 900 Z" fill="#7b3f36"/>
+  <path d="M0 760 C210 700 420 710 650 650 C920 580 1140 625 1360 590 C1480 570 1565 552 1600 542 L1600 900 L0 900 Z" fill="#9f5941"/>
+  <path d="M0 820 C260 770 515 785 745 742 C1030 690 1260 712 1600 660 L1600 900 L0 900 Z" fill="#d48354"/>
+  <text x="96" y="124" fill="#fffaf0" font-size="54" font-family="Georgia, serif">Mock /r/pics fixture</text>
+  <text x="96" y="186" fill="#fff7ec" font-size="30" font-family="Georgia, serif">Local SVG asset for the headless viewer smoke test</text>
+</svg>
