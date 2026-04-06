@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { dev } from '$app/environment';
   import { page } from '$app/stores';
   import { onMount, onDestroy } from 'svelte';
   import type { PostRecord } from '$lib/types';
-  import { fetchListing } from '$lib/transport/reddit';
+  import { fetchListing, readRedditDebugState } from '$lib/transport/reddit';
+  import type { RedditDebugState, RedditRequestError } from '$lib/transport/reddit';
   import { normalizeListingResponse } from '$lib/normalize/posts';
   import {
     upsertPost, upsertSubreddit, upsertMedia, upsertAdjacency,
@@ -18,18 +20,49 @@
   let currentIndex = $state(0);
   let galleryIndex = $state(0);
   let loading = $state(false);
-  let error = $state<string | null>(null);
+  let error = $state<RedditRequestError | null>(null);
   let seenIds = $state(new Set<string>());
   let afterCursor = $state<string | null>(null);
   let loadingMore = $state(false);
   let subredditParam = $state('');
   let pathInput = $state('');
+  let redditDebug = $state<RedditDebugState | null>(null);
+
+  function formatErrorJson(error: RedditRequestError): string {
+    return JSON.stringify(error, null, 2);
+  }
+
+  function formatCurlCommand(url: string): string {
+    return `curl -i -A 'Mozilla/5.0' -H 'Accept: application/json' '${url}'`;
+  }
+
+  function syncRedditDebug() {
+    redditDebug = readRedditDebugState();
+  }
+
+  function formatTimestamp(ts: number): string {
+    return new Date(ts).toLocaleTimeString();
+  }
+
+  const feedStatus = $derived(
+    error ? `error:${error.kind}` : loading ? 'loading' : posts.length > 0 ? 'ready' : 'idle'
+  );
 
   $effect(() => {
     const sub = $page.params.subreddit || 'all';
     subredditParam = sub;
     pathInput = `/r/${sub}`;
     loadFeed(sub);
+  });
+
+  $effect(() => {
+    if (!dev || typeof document === 'undefined') return;
+    const suffix =
+      error ? `ERR ${error.kind}` :
+      loading ? 'LOADING' :
+      posts.length > 0 ? 'READY' :
+      'IDLE';
+    document.title = `SubGlass [${suffix}]`;
   });
 
   async function loadFeed(sub: string) {
@@ -43,14 +76,16 @@
 
     const spec = { path: `/r/${sub}`, subreddits: sub.split('+') };
     const result = await fetchListing(spec, 25);
-    if (!result) {
-      error = 'Failed to fetch feed. Reddit may be blocking this request.';
+    syncRedditDebug();
+    if (!result.ok) {
+      console.error('Failed to load feed', result.error);
+      error = result.error;
       loading = false;
       return;
     }
 
-    afterCursor = result.data.after || null;
-    const normalized = normalizeListingResponse(result.data.children);
+    afterCursor = result.data.data.after || null;
+    const normalized = normalizeListingResponse(result.data.data.children);
     const mediaPosts = normalized.filter(p => p.media);
 
     await Promise.all(mediaPosts.map(async (p) => {
@@ -77,9 +112,10 @@
     loadingMore = true;
     const spec = { path: `/r/${subredditParam}`, subreddits: subredditParam.split('+'), after: afterCursor };
     const result = await fetchListing(spec, 25);
-    if (result) {
-      afterCursor = result.data.after || null;
-      const normalized = normalizeListingResponse(result.data.children);
+    syncRedditDebug();
+    if (result.ok) {
+      afterCursor = result.data.data.after || null;
+      const normalized = normalizeListingResponse(result.data.data.children);
       const mediaPosts = normalized.filter(p => p.media);
       await Promise.all(mediaPosts.map(async (p) => {
         await upsertPost(p);
@@ -87,6 +123,8 @@
         await ensureSubreddit(p.subreddit);
       }));
       posts = [...posts, ...mediaPosts];
+    } else {
+      console.error('Failed to load more posts', result.error);
     }
     loadingMore = false;
   }
@@ -248,6 +286,7 @@
   }
 
   onMount(() => {
+    syncRedditDebug();
     window.addEventListener('keydown', handleKeydown);
   });
 
@@ -264,7 +303,7 @@
   }
 </script>
 
-<div class="viewer-page">
+<div class="viewer-page" data-feed-status={feedStatus}>
   <nav class="topbar">
     <a href="/r/all" class="logo">SubGlass</a>
     <form onsubmit={(e) => { e.preventDefault(); navigate(); }} class="path-form">
@@ -286,11 +325,74 @@
     </div>
   </nav>
 
+  {#if dev}
+    <details class="debug-tray" open={!!error}>
+      <summary>
+        <span>Feed Debug</span>
+        <span class:error-state={!!error} class:loading-state={loading} class:ready-state={!error && !loading && posts.length > 0} class="debug-state">
+          {feedStatus}
+        </span>
+      </summary>
+      {#if redditDebug?.lastEntry}
+        <div class="debug-grid">
+          <div><strong>Scope:</strong> <code>{redditDebug.lastEntry.scope}</code></div>
+          <div><strong>Fetched:</strong> <code>{formatTimestamp(redditDebug.lastEntry.fetchedAt)}</code></div>
+          <div><strong>Duration:</strong> <code>{redditDebug.lastEntry.durationMs}ms</code></div>
+          <div><strong>Status:</strong> <code>{redditDebug.lastEntry.status ?? 'n/a'} {redditDebug.lastEntry.statusText ?? ''}</code></div>
+          <div class="debug-span"><strong>URL:</strong> <code>{redditDebug.lastEntry.url}</code></div>
+        </div>
+        <details class="debug-block" open={!!error}>
+          <summary>Last Request</summary>
+          <pre>{JSON.stringify(redditDebug.lastEntry, null, 2)}</pre>
+        </details>
+        <details class="debug-block">
+          <summary>Repro</summary>
+          <pre>{formatCurlCommand(redditDebug.lastEntry.url)}</pre>
+        </details>
+      {:else}
+        <p class="debug-empty">No Reddit request captured yet.</p>
+      {/if}
+    </details>
+  {/if}
+
   {#if loading}
     <div class="loading">Loading feed…</div>
   {:else if error}
     <div class="error">
-      <p>{error}</p>
+      <div class="error-header">
+        <p class="error-title">Feed fetch failed</p>
+        <code class="error-badge">{error.kind}</code>
+      </div>
+      <p class="error-summary">{error.message}</p>
+      <details class="error-details" open>
+        <summary>Request</summary>
+        <div class="error-meta">
+          <div><strong>URL:</strong> <code>{error.url}</code></div>
+          {#if error.status !== undefined}
+            <div><strong>Status:</strong> <code>{error.status} {error.statusText}</code></div>
+          {/if}
+          {#if error.contentType}
+            <div><strong>Content-Type:</strong> <code>{error.contentType}</code></div>
+          {/if}
+          {#if error.cause}
+            <div><strong>Cause:</strong> <code>{error.cause}</code></div>
+          {/if}
+          {#if error.responseSnippet}
+            <div class="error-body">
+              <strong>Response preview:</strong>
+              <pre>{error.responseSnippet}</pre>
+            </div>
+          {/if}
+        </div>
+      </details>
+      <details class="error-details" open>
+        <summary>Repro</summary>
+        <pre class="error-pre">{formatCurlCommand(error.url)}</pre>
+      </details>
+      <details class="error-details">
+        <summary>Raw Error</summary>
+        <pre class="error-pre">{formatErrorJson(error)}</pre>
+      </details>
       <button onclick={() => loadFeed(subredditParam)}>Retry</button>
     </div>
   {:else if posts.length === 0}
@@ -381,6 +483,85 @@
     position: relative;
     overflow: hidden;
   }
+  .debug-tray {
+    background: #0f0f0f;
+    border-bottom: 1px solid #242424;
+    padding: 10px 16px;
+  }
+  .debug-tray summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    color: #d7d7d7;
+    font-size: 0.9rem;
+  }
+  .debug-state {
+    border-radius: 999px;
+    border: 1px solid #3a3a3a;
+    padding: 2px 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.78rem;
+  }
+  .error-state {
+    color: #f1b3b3;
+    border-color: #6a3232;
+    background: #261414;
+  }
+  .loading-state {
+    color: #e0d29a;
+    border-color: #655a2e;
+    background: #241f10;
+  }
+  .ready-state {
+    color: #a7dfb0;
+    border-color: #2c6136;
+    background: #122015;
+  }
+  .debug-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 16px;
+    margin-top: 12px;
+    color: #bcbcbc;
+    font-size: 0.9rem;
+  }
+  .debug-span {
+    grid-column: 1 / -1;
+  }
+  .debug-grid code,
+  .debug-block pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  .debug-grid code {
+    color: #ebebeb;
+    word-break: break-all;
+  }
+  .debug-block {
+    margin-top: 10px;
+    background: #141414;
+    border: 1px solid #272727;
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .debug-block summary {
+    cursor: pointer;
+    color: #d7d7d7;
+  }
+  .debug-block pre {
+    margin: 10px 0 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #0d0d0d;
+    border: 1px solid #252525;
+    border-radius: 6px;
+    padding: 10px;
+    color: #cfcfcf;
+  }
+  .debug-empty {
+    margin: 12px 0 0;
+    color: #8f8f8f;
+  }
   .loading,
   .error,
   .empty {
@@ -398,5 +579,89 @@
     border: none;
     padding: 8px 16px;
     border-radius: 4px;
+  }
+  .error {
+    padding: 24px;
+    text-align: left;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  .error-title {
+    color: #f1b3b3;
+    font-weight: 600;
+    margin: 0;
+  }
+  .error-header {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .error-badge {
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px solid #3a3a3a;
+    background: #161616;
+    color: #d7d7d7;
+    font-size: 0.8rem;
+    text-transform: lowercase;
+  }
+  .error-summary {
+    width: 100%;
+    margin: 0;
+    color: #d7d7d7;
+  }
+  .error-details {
+    width: 100%;
+    background: #141414;
+    border: 1px solid #2b2b2b;
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .error-details summary {
+    cursor: pointer;
+    color: #d0d0d0;
+  }
+  .error-meta {
+    display: grid;
+    gap: 10px;
+    margin-top: 12px;
+    color: #b8b8b8;
+    font-size: 0.92rem;
+  }
+  .error-meta code,
+  .error-body pre,
+  .error-pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  .error-meta code {
+    word-break: break-all;
+    color: #e8e8e8;
+  }
+  .error-body {
+    display: grid;
+    gap: 6px;
+  }
+  .error-body pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #0d0d0d;
+    border: 1px solid #252525;
+    border-radius: 6px;
+    padding: 10px;
+    color: #cfcfcf;
+  }
+  .error-pre {
+    margin: 10px 0 0;
+    width: 100%;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #0d0d0d;
+    border: 1px solid #252525;
+    border-radius: 6px;
+    padding: 10px;
+    color: #cfcfcf;
   }
 </style>
