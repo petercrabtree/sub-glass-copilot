@@ -5,10 +5,17 @@
     media,
     itemIndex = 0,
     onevent,
+    onstatechange,
   }: {
     media: MediaGroup;
     itemIndex?: number;
     onevent?: (detail: { type: string; mediaId: string; postId: string }) => void;
+    onstatechange?: (detail: {
+      state: 'loading' | 'ready' | 'error';
+      mediaId: string;
+      postId: string;
+      itemIndex: number;
+    }) => void;
   } = $props();
 
   const item = $derived(media.items[itemIndex]);
@@ -22,6 +29,20 @@
     void media.id;
     imgLoaded = false;
     imgError = false;
+
+    if (!item) {
+      emitStateChange('error');
+      return;
+    }
+
+    emitStateChange(
+      media.kind === 'image' ||
+      media.kind === 'external_image' ||
+      media.kind === 'gallery' ||
+      media.kind === 'video'
+        ? 'loading'
+        : 'error'
+    );
   });
 
   function onVideoPlay() {
@@ -30,6 +51,10 @@
 
   function onVideoPause() {
     onevent?.({ type: 'video_pause', mediaId: media.id, postId: media.postId });
+  }
+
+  function emitStateChange(state: 'loading' | 'ready' | 'error') {
+    onstatechange?.({ state, mediaId: media.id, postId: media.postId, itemIndex });
   }
 </script>
 
@@ -47,6 +72,8 @@
         class="media-video"
         onplay={onVideoPlay}
         onpause={onVideoPause}
+        onloadeddata={() => emitStateChange('ready')}
+        onerror={() => emitStateChange('error')}
       >
         {#if item.dashUrl}
           <source src={item.dashUrl} type="application/dash+xml" />
@@ -64,8 +91,14 @@
           alt="Post media"
           class="media-img"
           class:loaded={imgLoaded}
-          onload={() => (imgLoaded = true)}
-          onerror={() => (imgError = true)}
+          onload={() => {
+            imgLoaded = true;
+            emitStateChange('ready');
+          }}
+          onerror={() => {
+            imgError = true;
+            emitStateChange('error');
+          }}
         />
       {:else}
         <div class="media-error">

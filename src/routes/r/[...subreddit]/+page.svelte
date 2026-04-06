@@ -14,6 +14,9 @@
   import { extractLinksFromPost } from '$lib/adjacency/extract';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
   import PostOverlay from '$lib/components/PostOverlay.svelte';
+  import { getViewerActionForKey, getViewerShortcut } from '$lib/viewer/keyboard';
+
+  type LoadedMediaStatus = 'queued' | 'seen' | 'loading' | 'ready' | 'error';
 
   // State
   let posts = $state<PostRecord[]>([]);
@@ -28,6 +31,7 @@
   let pathInput = $state('');
   let redditDebug = $state<RedditDebugState | null>(null);
   let listingTime = $state<string | undefined>(undefined);
+  let currentMediaLoadState = $state<'loading' | 'ready' | 'error'>('loading');
 
   function formatErrorJson(error: RedditRequestError): string {
     return JSON.stringify(error, null, 2);
@@ -159,6 +163,45 @@
   const currentItem = $derived(currentMedia?.items?.[galleryIndex]);
   const totalItems = $derived(currentMedia?.items?.length ?? 0);
   const isSeen = $derived(currentPost ? seenIds.has(currentPost.id) : false);
+  const loadedMediaStates = $derived(
+    posts.map((post, index) => {
+      const status: LoadedMediaStatus =
+        index === currentIndex
+          ? currentMediaLoadState
+          : seenIds.has(post.id)
+            ? 'seen'
+            : 'queued';
+
+      return {
+        id: post.id,
+        index,
+        kind: post.media?.kind ?? 'unknown',
+        title: post.title,
+        itemCount: post.media?.items.length ?? 0,
+        rating: post.localRating,
+        status,
+      };
+    })
+  );
+
+  $effect(() => {
+    void currentPost?.id;
+    void currentMedia?.id;
+    void galleryIndex;
+
+    if (!currentMedia) {
+      currentMediaLoadState = 'loading';
+      return;
+    }
+
+    currentMediaLoadState =
+      currentMedia.kind === 'image' ||
+      currentMedia.kind === 'external_image' ||
+      currentMedia.kind === 'gallery' ||
+      currentMedia.kind === 'video'
+        ? 'loading'
+        : 'error';
+  });
 
   async function recordEvent(type: string, post: PostRecord | undefined) {
     if (!post) return;
@@ -249,50 +292,56 @@
     await recordEvent('open_media', currentPost);
   }
 
+  async function stepForward() {
+    if (currentMedia?.kind === 'gallery') {
+      await advanceGallery();
+      return;
+    }
+
+    await advance();
+  }
+
+  async function stepBackward() {
+    if (currentMedia?.kind === 'gallery') {
+      await retreatGallery();
+      return;
+    }
+
+    await retreat();
+  }
+
+  function handleMediaStateChange(detail: { state: 'loading' | 'ready' | 'error' }) {
+    currentMediaLoadState = detail.state;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-    switch (e.key) {
-      case 'ArrowDown':
-      case 'j':
-        e.preventDefault();
-        if (currentMedia?.kind === 'gallery') advanceGallery();
-        else advance();
+    const action = getViewerActionForKey(e.key);
+    if (!action) return;
+
+    if (getViewerShortcut(action).preventDefault) {
+      e.preventDefault();
+    }
+
+    switch (action) {
+      case 'step_forward':
+        void stepForward();
         break;
-      case 'ArrowUp':
-      case 'k':
-        e.preventDefault();
-        if (currentMedia?.kind === 'gallery') retreatGallery();
-        else retreat();
+      case 'step_backward':
+        void stepBackward();
         break;
-      case 'ArrowRight':
-      case 'l':
-        e.preventDefault();
-        if (currentMedia?.kind === 'gallery') advanceGallery();
-        else advance();
+      case 'open_reddit':
+        void openReddit();
         break;
-      case 'ArrowLeft':
-      case 'h':
-        e.preventDefault();
-        if (currentMedia?.kind === 'gallery') retreatGallery();
-        else retreat();
+      case 'open_media':
+        void openMedia();
         break;
-      case ' ':
-        e.preventDefault();
-        advance();
+      case 'rate_up':
+        void rateUp();
         break;
-      case 'r':
-      case 'R':
-        openReddit();
-        break;
-      case 'o':
-        openMedia();
-        break;
-      case 'u':
-        rateUp();
-        break;
-      case 'd':
-        rateDown();
+      case 'rate_down':
+        void rateDown();
         break;
     }
   }
@@ -416,6 +465,7 @@
           media={currentMedia}
           itemIndex={galleryIndex}
           onevent={(detail) => addEvent({ ...detail, ts: Date.now(), type: detail.type as Parameters<typeof addEvent>[0]['type'] })}
+          onstatechange={handleMediaStateChange}
         />
         <PostOverlay
           post={currentPost}
@@ -424,8 +474,11 @@
           postIndex={currentIndex}
           totalPosts={posts.length}
           isSeen={isSeen}
+          loadedMedia={loadedMediaStates}
           onadvance={advance}
           onretreat={retreat}
+          onadvanceGallery={advanceGallery}
+          onretreatGallery={retreatGallery}
           onrateUp={rateUp}
           onrateDown={rateDown}
           onopenReddit={openReddit}
