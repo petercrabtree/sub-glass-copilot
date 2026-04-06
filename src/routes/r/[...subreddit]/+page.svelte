@@ -27,6 +27,7 @@
   let subredditParam = $state('');
   let pathInput = $state('');
   let redditDebug = $state<RedditDebugState | null>(null);
+  let listingTime = $state<string | undefined>(undefined);
 
   function formatErrorJson(error: RedditRequestError): string {
     return JSON.stringify(error, null, 2);
@@ -50,9 +51,11 @@
 
   $effect(() => {
     const sub = $page.params.subreddit || 'all';
+    const time = $page.url.searchParams.get('t') || undefined;
     subredditParam = sub;
-    pathInput = `/r/${sub}`;
-    loadFeed(sub);
+    listingTime = time;
+    pathInput = time ? `/r/${sub}?t=${time}` : `/r/${sub}`;
+    loadFeed(sub, time);
   });
 
   $effect(() => {
@@ -65,7 +68,11 @@
     document.title = `SubGlass [${suffix}]`;
   });
 
-  async function loadFeed(sub: string) {
+  function extractSubreddits(sub: string) {
+    return sub.split('/')[0]?.split('+') ?? [];
+  }
+
+  async function loadFeed(sub: string, time: string | undefined = listingTime) {
     loading = true;
     error = null;
     posts = [];
@@ -74,7 +81,7 @@
     afterCursor = null;
     seenIds = await getSeenPostIds();
 
-    const spec = { path: `/r/${sub}`, subreddits: sub.split('+') };
+    const spec = { path: `/r/${sub}`, subreddits: extractSubreddits(sub), time };
     const result = await fetchListing(spec, 25);
     syncRedditDebug();
     if (!result.ok) {
@@ -110,7 +117,12 @@
   async function loadMore() {
     if (loadingMore || !afterCursor) return;
     loadingMore = true;
-    const spec = { path: `/r/${subredditParam}`, subreddits: subredditParam.split('+'), after: afterCursor };
+    const spec = {
+      path: `/r/${subredditParam}`,
+      subreddits: extractSubreddits(subredditParam),
+      after: afterCursor,
+      time: listingTime
+    };
     const result = await fetchListing(spec, 25);
     syncRedditDebug();
     if (result.ok) {
@@ -295,10 +307,10 @@
   });
 
   async function navigate() {
-    const match = pathInput.match(/^\/?(r\/[^?#]+)/);
-    if (match) {
+    const normalized = pathInput.trim().startsWith('/') ? pathInput.trim() : `/${pathInput.trim()}`;
+    if (normalized.startsWith('/r/')) {
       const { goto } = await import('$app/navigation');
-      goto(`/${match[1]}`);
+      goto(normalized);
     }
   }
 </script>

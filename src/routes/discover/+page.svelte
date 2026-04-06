@@ -6,6 +6,7 @@
   let subreddits = $state<SubredditRecord[]>([]);
   let loading = $state(true);
   let suggestions = $state<Array<{ name: string; reason: string; score: number }>>([]);
+  let sortedSubreddits = $derived([...subreddits].sort((a, b) => b.localRating - a.localRating));
 
   onMount(async () => {
     subreddits = await getAllSubreddits();
@@ -103,7 +104,7 @@
     <section class="subreddit-list">
       <h2>All Known Subreddits ({subreddits.length})</h2>
       <div class="sub-table">
-        {#each subreddits.sort((a, b) => b.localRating - a.localRating) as sub}
+        {#each sortedSubreddits as sub}
           <div class="sub-row" class:muted={sub.isMuted}>
             <a href="/r/{sub.name}" class="sub-link">r/{sub.name}</a>
             <span class="rating" class:positive={sub.localRating > 0} class:negative={sub.localRating < 0}>
