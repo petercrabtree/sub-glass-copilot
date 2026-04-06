@@ -5,13 +5,16 @@ import path from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import puppeteer from 'puppeteer-core';
+import { DEFAULT_SMOKE_ROUTE_PATH } from '../dev/smoke-config.mjs';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 4173;
 const DEFAULT_ITERATIONS = 1;
 const DEFAULT_INTERVAL_MS = 5000;
 const DEFAULT_TIMEOUT_MS = 30000;
-const DEFAULT_REDDIT_BASE_URL = '/__mock/reddit';
+const DEFAULT_MOCK_REDDIT_BASE_URL = '/__mock/reddit';
+const DEFAULT_LIVE_REDDIT_BASE_URL = 'https://old.reddit.com';
+const DEFAULT_REDDIT_SOURCE = 'mock';
 const DEFAULT_VIEWPORT = { width: 1440, height: 1024, deviceScaleFactor: 1 };
 const CHROME_VERSION = '146.0.7680.178';
 const DESKTOP_USER_AGENT =
@@ -38,7 +41,7 @@ const CHROME_CANDIDATES = [
 ].filter(Boolean);
 
 const ROUTES = [
-  { name: 'viewer-pics', path: '/r/pics', kind: 'viewer' },
+  { name: 'viewer-default', path: DEFAULT_SMOKE_ROUTE_PATH, kind: 'viewer' },
   { name: 'discover', path: '/discover', kind: 'discover' },
   { name: 'admin', path: '/admin', kind: 'admin' }
 ];
@@ -50,10 +53,18 @@ const intervalMs = getIntegerArg('--interval-ms', process.env.HEADLESS_SMOKE_INT
 const host = getStringArg('--host', process.env.HEADLESS_SMOKE_HOST, DEFAULT_HOST);
 const port = getIntegerArg('--port', process.env.HEADLESS_SMOKE_PORT, DEFAULT_PORT);
 const baseUrlArg = getStringArg('--base-url', process.env.HEADLESS_SMOKE_BASE_URL, '');
+const redditSource = getChoiceArg(
+  '--reddit-source',
+  process.env.HEADLESS_SMOKE_REDDIT_SOURCE,
+  ['mock', 'live'],
+  DEFAULT_REDDIT_SOURCE
+);
+const defaultRedditBaseUrl =
+  redditSource === 'live' ? DEFAULT_LIVE_REDDIT_BASE_URL : DEFAULT_MOCK_REDDIT_BASE_URL;
 const redditBaseUrl = getStringArg(
   '--reddit-base-url',
   process.env.HEADLESS_SMOKE_REDDIT_BASE_URL,
-  DEFAULT_REDDIT_BASE_URL
+  defaultRedditBaseUrl
 );
 const timeoutMs = getIntegerArg('--timeout-ms', process.env.HEADLESS_SMOKE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
 const baseUrl = baseUrlArg || `http://${host}:${port}`;
@@ -65,6 +76,7 @@ const summary = {
   runId,
   startedAt: new Date().toISOString(),
   baseUrl,
+  redditSource,
   redditBaseUrl,
   shouldSpawnServer,
   loop,
@@ -524,7 +536,12 @@ function startDevServer(hostValue, portValue, redditBaseUrlValue) {
 }
 
 function isTrackedRedditUrl(url) {
-  return url.includes('/__mock/reddit/') || url.includes('old.reddit.com/');
+  return (
+    url.includes('/__mock/reddit/') ||
+    url.includes('old.reddit.com/') ||
+    url.includes('www.reddit.com/') ||
+    url.includes('api.reddit.com/')
+  );
 }
 
 async function waitForServer(url, timeout, child) {
@@ -608,6 +625,12 @@ function getIntegerArg(flag, envValue, fallback) {
   if (typeof rawValue !== 'string' || rawValue.trim() === '') return fallback;
   const parsed = Number.parseInt(rawValue, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getChoiceArg(flag, envValue, allowedValues, fallback) {
+  const rawValue = readFlagValue(flag) ?? envValue;
+  if (typeof rawValue !== 'string') return fallback;
+  return allowedValues.includes(rawValue) ? rawValue : fallback;
 }
 
 function readFlagValue(flag) {

@@ -1,36 +1,70 @@
+import generatedSmokeFixture from './generated-smoke-fixture.json';
+import { DEFAULT_SMOKE_FIXTURE_PATHNAME } from './smoke-config.mjs';
+
 type RedditListingChild = {
   kind: 't3';
   data: Record<string, unknown>;
 };
 
 type RedditFixtureMap = Record<string, unknown>;
+type GeneratedSmokeFixture = {
+  source: {
+    posts: Array<{
+      subreddit: string;
+      over18: boolean;
+    }>;
+  };
+  listing: unknown;
+};
 
 const MOCK_AUTHOR = 'subglass_mock';
 const MOCK_CREATED_UTC = 1_775_449_000;
+const smokeFixture = generatedSmokeFixture as GeneratedSmokeFixture;
+const smokeFixtureNsfwNames = new Set(
+  smokeFixture.source.posts
+    .filter((post) => post.over18)
+    .map((post) => post.subreddit.toLowerCase())
+);
+const smokeFixtureAboutEntries = Object.fromEntries(
+  [...new Set(smokeFixture.source.posts.map((post) => post.subreddit))].map((name) => [
+    `/r/${name}/about/.json`,
+    createAbout(name)
+  ])
+);
 
 function createImagePost(
   id: string,
   title: string,
   assetPath: string,
   score: number,
-  comments: number
+  comments: number,
+  options: {
+    subreddit?: string;
+    over18?: boolean;
+    permalinkSlug?: string;
+    createdUtc?: number;
+  } = {}
 ): RedditListingChild {
+  const subreddit = options.subreddit ?? 'pics';
+  const permalinkSlug = options.permalinkSlug ?? id;
+  const createdUtc = options.createdUtc ?? MOCK_CREATED_UTC;
+
   return {
     kind: 't3',
     data: {
       id,
-      subreddit: 'pics',
+      subreddit,
       title,
       author: MOCK_AUTHOR,
-      permalink: `/r/pics/comments/${id}/${id}/`,
+      permalink: `/r/${subreddit}/comments/${id}/${permalinkSlug}/`,
       url: assetPath,
       domain: 'subglass.mock',
       link_flair_text: 'Mock',
-      over_18: false,
+      over_18: options.over18 ?? false,
       is_self: false,
       score,
       num_comments: comments,
-      created_utc: MOCK_CREATED_UTC,
+      created_utc: createdUtc,
       thumbnail: assetPath,
       post_hint: 'image',
       preview: {
@@ -46,23 +80,32 @@ function createImagePost(
   };
 }
 
-function createGalleryPost(): RedditListingChild {
+function createGalleryPost(
+  options: {
+    subreddit?: string;
+    over18?: boolean;
+    createdUtc?: number;
+  } = {}
+): RedditListingChild {
+  const subreddit = options.subreddit ?? 'pics';
+  const createdUtc = options.createdUtc ?? (MOCK_CREATED_UTC - 90);
+
   return {
     kind: 't3',
     data: {
       id: 'mockgallery1',
-      subreddit: 'pics',
+      subreddit,
       title: 'Mock gallery with two locally served panels',
       author: MOCK_AUTHOR,
-      permalink: '/r/pics/comments/mockgallery1/mock_gallery/',
+      permalink: `/r/${subreddit}/comments/mockgallery1/mock_gallery/`,
       url: '/mock-reddit-assets/gallery-1.svg',
       domain: 'subglass.mock',
       link_flair_text: 'Gallery',
-      over_18: false,
+      over_18: options.over18 ?? false,
       is_self: false,
       score: 842,
       num_comments: 31,
-      created_utc: MOCK_CREATED_UTC - 90,
+      created_utc: createdUtc,
       thumbnail: '/mock-reddit-assets/gallery-1.svg',
       is_gallery: true,
       gallery_data: {
@@ -118,7 +161,7 @@ function createAbout(name: string) {
       public_description: `Fixture-backed mock subreddit for ${name}`,
       description: `Fixture-backed mock subreddit for ${name}`,
       subscribers: 424242,
-      over18: false
+      over18: smokeFixtureNsfwNames.has(name.toLowerCase())
     }
   };
 }
@@ -145,7 +188,9 @@ export const mockRedditFixtures: RedditFixtureMap = {
   '/r/pics/.json': listing,
   '/r/all/.json': listing,
   '/r/videos/.json': listing,
+  [DEFAULT_SMOKE_FIXTURE_PATHNAME]: smokeFixture.listing,
   '/r/pics/about/.json': createAbout('pics'),
   '/r/all/about/.json': createAbout('all'),
-  '/r/videos/about/.json': createAbout('videos')
+  '/r/videos/about/.json': createAbout('videos'),
+  ...smokeFixtureAboutEntries
 };
