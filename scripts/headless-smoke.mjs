@@ -40,14 +40,9 @@ const CHROME_CANDIDATES = [
   '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'
 ].filter(Boolean);
 
-const ROUTES = [
-  { name: 'viewer-default', path: DEFAULT_SMOKE_ROUTE_PATH, kind: 'viewer' },
-  { name: 'discover', path: '/discover', kind: 'discover' },
-  { name: 'admin', path: '/admin', kind: 'admin' }
-];
-
 const args = process.argv.slice(2);
 const loop = args.includes('--loop');
+const headful = args.includes('--headful') || process.env.HEADLESS_SMOKE_HEADLESS === 'false';
 const iterations = getIntegerArg('--iterations', process.env.HEADLESS_SMOKE_ITERATIONS, DEFAULT_ITERATIONS);
 const intervalMs = getIntegerArg('--interval-ms', process.env.HEADLESS_SMOKE_INTERVAL_MS, DEFAULT_INTERVAL_MS);
 const host = getStringArg('--host', process.env.HEADLESS_SMOKE_HOST, DEFAULT_HOST);
@@ -67,6 +62,16 @@ const redditBaseUrl = getStringArg(
   defaultRedditBaseUrl
 );
 const timeoutMs = getIntegerArg('--timeout-ms', process.env.HEADLESS_SMOKE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+const viewerPath = getStringArg(
+  '--viewer-path',
+  process.env.HEADLESS_SMOKE_VIEWER_PATH,
+  DEFAULT_SMOKE_ROUTE_PATH
+);
+const ROUTES = [
+  { name: 'viewer-default', path: viewerPath, kind: 'viewer' },
+  { name: 'discover', path: '/discover', kind: 'discover' },
+  { name: 'admin', path: '/admin', kind: 'admin' }
+];
 const baseUrl = baseUrlArg || `http://${host}:${port}`;
 const shouldSpawnServer = !baseUrlArg;
 const runId = new Date().toISOString().replace(/[:.]/g, '-');
@@ -83,6 +88,7 @@ const summary = {
   iterationsRequested: loop ? 'infinite' : iterations,
   chromePath: null,
   outputDir: relativePath(outputDir),
+  viewerPath,
   routes: ROUTES,
   iterations: []
 };
@@ -112,7 +118,7 @@ async function main() {
 
   browser = await puppeteer.launch({
     executablePath: chromePath,
-    headless: true,
+    headless: !headful,
     userDataDir: path.join(outputDir, 'chrome-profile'),
     defaultViewport: DEFAULT_VIEWPORT,
     args: [
@@ -437,7 +443,7 @@ async function exerciseViewerAdvance(page, routePrefix) {
 
   try {
     await page.hover('.overlay');
-    await page.click('.nav-btn.next');
+    await page.click('.nav-zone.right');
     await page.waitForFunction(
       (counterText) => document.querySelector('.counter')?.textContent?.trim() !== counterText,
       { timeout: 10000 },
@@ -446,14 +452,16 @@ async function exerciseViewerAdvance(page, routePrefix) {
     await delay(750);
 
     const afterState = await page.evaluate(collectViewerState);
+    const galleryInteraction = await exerciseGalleryZones(page);
     const screenshotPath = `${routePrefix}-after-next.png`;
     await page.screenshot({ path: screenshotPath, fullPage: true });
 
     return {
-      ok: afterState.counter !== beforeCounter?.trim(),
+      ok: afterState.counter !== beforeCounter?.trim() && (galleryInteraction?.ok ?? true),
       beforeCounter: beforeCounter?.trim() ?? null,
       afterCounter: afterState.counter,
       afterState,
+      galleryInteraction,
       screenshot: relativePath(screenshotPath)
     };
   } catch (error) {
@@ -465,6 +473,158 @@ async function exerciseViewerAdvance(page, routePrefix) {
   }
 }
 
+async function exerciseGalleryZones(page) {
+  const galleryState = await navigateToGalleryPost(page);
+  if (!galleryState.ok) return galleryState;
+  if (galleryState.skipped) return galleryState;
+
+  const galleryStart = await page.evaluate(collectViewerState);
+  const startPostCounter = galleryStart.counter?.trim() ?? null;
+  const startGalleryCounter = galleryStart.galleryCounter?.trim() ?? null;
+
+  if (!startPostCounter || !startGalleryCounter) {
+    return {
+      ok: false,
+      error: { message: 'Gallery state was expected but not available.' }
+    };
+  }
+
+  try {
+    await page.click('.nav-zone.bottom');
+    await page.waitForFunction(
+      ({ galleryCounter, postCounter }) => {
+        const currentGallery = document.querySelector('.gallery-counter')?.textContent?.trim() ?? null;
+        const currentPost = document.querySelector('.counter')?.textContent?.trim() ?? null;
+        return currentGallery !== galleryCounter && currentPost === postCounter;
+      },
+      { timeout: 10000 },
+      { galleryCounter: startGalleryCounter, postCounter: startPostCounter }
+    );
+    await delay(250);
+    const afterBottom = await page.evaluate(collectViewerState);
+
+    await page.click('.nav-zone.top');
+    await page.waitForFunction(
+      ({ galleryCounter, postCounter }) => {
+        const currentGallery = document.querySelector('.gallery-counter')?.textContent?.trim() ?? null;
+        const currentPost = document.querySelector('.counter')?.textContent?.trim() ?? null;
+        return currentGallery === galleryCounter && currentPost === postCounter;
+      },
+      { timeout: 10000 },
+      { galleryCounter: startGalleryCounter, postCounter: startPostCounter }
+    );
+    await delay(250);
+    const afterTop = await page.evaluate(collectViewerState);
+
+    await page.click('.nav-zone.top-left');
+    await page.waitForFunction(
+      (counterText) => document.querySelector('.counter')?.textContent?.trim() !== counterText,
+      { timeout: 10000 },
+      startPostCounter
+    );
+    await delay(250);
+    const afterTopLeft = await page.evaluate(collectViewerState);
+
+    await page.click('.nav-zone.right');
+    await page.waitForFunction(
+      (counterText) => document.querySelector('.counter')?.textContent?.trim() !== counterText,
+      { timeout: 10000 },
+      afterTopLeft.counter?.trim() ?? ''
+    );
+    await delay(250);
+    const galleryReset = await page.evaluate(collectViewerState);
+
+    await page.click('.nav-zone.bottom-right');
+    await page.waitForFunction(
+      ({ galleryCounter, postCounter }) => {
+        const currentGallery = document.querySelector('.gallery-counter')?.textContent?.trim() ?? null;
+        const currentPost = document.querySelector('.counter')?.textContent?.trim() ?? null;
+        return currentGallery !== galleryCounter && currentPost === postCounter;
+      },
+      { timeout: 10000 },
+      {
+        galleryCounter: galleryReset.galleryCounter?.trim() ?? '',
+        postCounter: galleryReset.counter?.trim() ?? ''
+      }
+    );
+    await delay(250);
+    const afterBottomRightGallery = await page.evaluate(collectViewerState);
+
+    await page.click('.nav-zone.bottom-right');
+    await page.waitForFunction(
+      (counterText) => document.querySelector('.counter')?.textContent?.trim() !== counterText,
+      { timeout: 10000 },
+      afterBottomRightGallery.counter?.trim() ?? ''
+    );
+    await delay(250);
+    const afterBottomRightFallback = await page.evaluate(collectViewerState);
+
+    return {
+      ok:
+        afterBottom.counter === startPostCounter &&
+        afterBottom.galleryCounter !== startGalleryCounter &&
+        afterTop.counter === startPostCounter &&
+        afterTop.galleryCounter === startGalleryCounter &&
+        afterTopLeft.counter !== startPostCounter &&
+        galleryReset.galleryCounter === startGalleryCounter &&
+        afterBottomRightGallery.counter === galleryReset.counter &&
+        afterBottomRightGallery.galleryCounter !== galleryReset.galleryCounter &&
+        afterBottomRightFallback.counter !== afterBottomRightGallery.counter,
+      startPostCounter,
+      startGalleryCounter,
+      afterBottom,
+      afterTop,
+      afterTopLeft,
+      galleryReset,
+      afterBottomRightGallery,
+      afterBottomRightFallback
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      startPostCounter,
+      startGalleryCounter,
+      error: serializeError(error)
+    };
+  }
+}
+
+async function navigateToGalleryPost(page) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const state = await page.evaluate(collectViewerState);
+    if (state.galleryCounter) {
+      return {
+        ok: true,
+        skipped: false,
+        state
+      };
+    }
+
+    const [currentIndex, totalPosts] = parseCounter(state.counter);
+    if (!totalPosts || currentIndex >= totalPosts) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'No gallery post was available in the current fixture set.'
+      };
+    }
+
+    await page.click('.nav-zone.right');
+    await page.waitForFunction(
+      (counterText) => document.querySelector('.counter')?.textContent?.trim() !== counterText,
+      { timeout: 10000 },
+      state.counter?.trim() ?? ''
+    );
+    await delay(250);
+  }
+
+  return {
+    ok: true,
+    skipped: true,
+    reason: 'Timed out looking for a gallery post in the current fixture set.'
+  };
+}
+
 function collectViewerState() {
   const viewer = document.querySelector('.viewer-page');
   const counter = document.querySelector('.counter')?.textContent?.trim() ?? null;
@@ -473,6 +633,7 @@ function collectViewerState() {
     documentTitle: document.title,
     feedStatus: viewer?.getAttribute('data-feed-status') ?? null,
     counter,
+    galleryCounter: document.querySelector('.gallery-counter')?.textContent?.trim() ?? null,
     postTitle: document.querySelector('.post-title')?.textContent?.trim() ?? null,
     subreddit: document.querySelector('.subreddit')?.textContent?.trim() ?? null,
     hasImage: Boolean(document.querySelector('img.media-img')),
