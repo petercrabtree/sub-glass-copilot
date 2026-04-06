@@ -1,6 +1,15 @@
 <script lang="ts">
+  import { dev } from '$app/environment';
+  import { onMount } from 'svelte';
+  import { startDevErrorReporter } from '$lib/dev/error-reporter';
   import '../app.css';
+
   let { children } = $props();
+
+  onMount(() => {
+    if (!dev) return;
+    return startDevErrorReporter();
+  });
 </script>
 
 <div class="app">
