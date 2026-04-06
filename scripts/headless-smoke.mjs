@@ -1,0 +1,551 @@
+import { spawn } from 'node:child_process';
+import { access, mkdir, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import path from 'node:path';
+import process from 'node:process';
+import { setTimeout as delay } from 'node:timers/promises';
+import puppeteer from 'puppeteer-core';
+
+const DEFAULT_HOST = '127.0.0.1';
+const DEFAULT_PORT = 4173;
+const DEFAULT_ITERATIONS = 1;
+const DEFAULT_INTERVAL_MS = 5000;
+const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_VIEWPORT = { width: 1440, height: 1024, deviceScaleFactor: 1 };
+
+const CHROME_CANDIDATES = [
+  process.env.CHROME_BIN,
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'
+].filter(Boolean);
+
+const ROUTES = [
+  { name: 'viewer-pics', path: '/r/pics', kind: 'viewer' },
+  { name: 'discover', path: '/discover', kind: 'discover' },
+  { name: 'admin', path: '/admin', kind: 'admin' }
+];
+
+const args = process.argv.slice(2);
+const loop = args.includes('--loop');
+const iterations = getIntegerArg('--iterations', process.env.HEADLESS_SMOKE_ITERATIONS, DEFAULT_ITERATIONS);
+const intervalMs = getIntegerArg('--interval-ms', process.env.HEADLESS_SMOKE_INTERVAL_MS, DEFAULT_INTERVAL_MS);
+const host = getStringArg('--host', process.env.HEADLESS_SMOKE_HOST, DEFAULT_HOST);
+const port = getIntegerArg('--port', process.env.HEADLESS_SMOKE_PORT, DEFAULT_PORT);
+const baseUrlArg = getStringArg('--base-url', process.env.HEADLESS_SMOKE_BASE_URL, '');
+const timeoutMs = getIntegerArg('--timeout-ms', process.env.HEADLESS_SMOKE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+const baseUrl = baseUrlArg || `http://${host}:${port}`;
+const shouldSpawnServer = !baseUrlArg;
+const runId = new Date().toISOString().replace(/[:.]/g, '-');
+const outputDir = path.join(process.cwd(), 'build', 'headless-smoke', runId);
+const serverLogs = [];
+const summary = {
+  runId,
+  startedAt: new Date().toISOString(),
+  baseUrl,
+  shouldSpawnServer,
+  loop,
+  iterationsRequested: loop ? 'infinite' : iterations,
+  chromePath: null,
+  outputDir: relativePath(outputDir),
+  routes: ROUTES,
+  iterations: []
+};
+
+let browser;
+let devServer;
+let stopRequested = false;
+
+process.on('SIGINT', () => {
+  stopRequested = true;
+});
+
+process.on('SIGTERM', () => {
+  stopRequested = true;
+});
+
+async function main() {
+  await mkdir(outputDir, { recursive: true });
+
+  const chromePath = await findChromeExecutable();
+  summary.chromePath = chromePath;
+
+  if (shouldSpawnServer) {
+    devServer = startDevServer(host, port);
+    await waitForServer(baseUrl, timeoutMs, devServer);
+  }
+
+  browser = await puppeteer.launch({
+    executablePath: chromePath,
+    headless: true,
+    userDataDir: path.join(outputDir, 'chrome-profile'),
+    defaultViewport: DEFAULT_VIEWPORT,
+    args: [
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-dev-shm-usage',
+      '--disable-extensions',
+      '--disable-popup-blocking',
+      '--hide-scrollbars',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--no-first-run',
+      '--window-size=1440,1024'
+    ]
+  });
+
+  let iterationIndex = 0;
+  const maxIterations = loop ? Number.POSITIVE_INFINITY : iterations;
+  while (!stopRequested && iterationIndex < maxIterations) {
+    iterationIndex += 1;
+    const iterationDir = path.join(outputDir, `iteration-${String(iterationIndex).padStart(2, '0')}`);
+    await mkdir(iterationDir, { recursive: true });
+
+    const iterationRecord = {
+      index: iterationIndex,
+      startedAt: new Date().toISOString(),
+      outputDir: relativePath(iterationDir),
+      routes: []
+    };
+    summary.iterations.push(iterationRecord);
+
+    for (const route of ROUTES) {
+      if (stopRequested) break;
+      const result = await captureRoute(route, iterationDir);
+      iterationRecord.routes.push(result);
+      await persistSummary();
+    }
+
+    iterationRecord.finishedAt = new Date().toISOString();
+    await persistSummary();
+
+    if (stopRequested || iterationIndex >= maxIterations) break;
+    await delay(intervalMs);
+  }
+
+  summary.finishedAt = new Date().toISOString();
+  if (serverLogs.length > 0) {
+    await writeFile(path.join(outputDir, 'server.log'), serverLogs.join(''), 'utf8');
+    summary.serverLog = relativePath(path.join(outputDir, 'server.log'));
+  }
+
+  await persistSummary();
+
+  const failures = summary.iterations.flatMap((iteration) =>
+    iteration.routes.filter((route) => !route.ok)
+  );
+
+  console.log(`Headless smoke artifacts: ${outputDir}`);
+  for (const iteration of summary.iterations) {
+    for (const route of iteration.routes) {
+      console.log(
+        `${route.ok ? 'PASS' : 'FAIL'} ${route.name} ${route.primaryScreenshot ?? ''}`.trim()
+      );
+    }
+  }
+
+  if (failures.length > 0) {
+    process.exitCode = 1;
+  }
+}
+
+async function captureRoute(route, iterationDir) {
+  const page = await browser.newPage();
+  const routePrefix = path.join(iterationDir, route.name);
+  const consoleMessages = [];
+  const pageErrors = [];
+  const failedRequests = [];
+  const startedAt = new Date().toISOString();
+
+  page.on('console', (message) => {
+    consoleMessages.push({
+      type: message.type(),
+      text: message.text(),
+      location: message.location()
+    });
+  });
+
+  page.on('pageerror', (error) => {
+    pageErrors.push(serializeError(error));
+  });
+
+  page.on('requestfailed', (request) => {
+    failedRequests.push({
+      method: request.method(),
+      url: request.url(),
+      errorText: request.failure()?.errorText ?? 'unknown'
+    });
+  });
+
+  try {
+    let result;
+    if (route.kind === 'viewer') {
+      result = await captureViewerRoute(page, route, routePrefix, timeoutMs);
+    } else if (route.kind === 'discover') {
+      result = await captureDiscoverRoute(page, route, routePrefix, timeoutMs);
+    } else {
+      result = await captureAdminRoute(page, route, routePrefix, timeoutMs);
+    }
+
+    const finishedAt = new Date().toISOString();
+    const routeResult = {
+      ...result,
+      name: route.name,
+      kind: route.kind,
+      path: route.path,
+      startedAt,
+      finishedAt,
+      durationMs: new Date(finishedAt).getTime() - new Date(startedAt).getTime(),
+      consoleMessages,
+      pageErrors,
+      failedRequests
+    };
+
+    routeResult.ok =
+      result.ok &&
+      routeResult.pageErrors.length === 0 &&
+      !routeResult.failedRequests.some((request) => request.url.includes('/@vite/client'));
+
+    await writeFile(`${routePrefix}.json`, JSON.stringify(routeResult, null, 2), 'utf8');
+    return routeResult;
+  } catch (error) {
+    const errorResult = {
+      name: route.name,
+      kind: route.kind,
+      path: route.path,
+      ok: false,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      error: serializeError(error),
+      consoleMessages,
+      pageErrors,
+      failedRequests
+    };
+
+    try {
+      const failureScreenshot = `${routePrefix}-failure.png`;
+      await page.screenshot({ path: failureScreenshot, fullPage: true });
+      errorResult.primaryScreenshot = relativePath(failureScreenshot);
+    } catch {
+      // Ignore secondary screenshot failures.
+    }
+
+    await writeFile(`${routePrefix}.json`, JSON.stringify(errorResult, null, 2), 'utf8');
+    return errorResult;
+  } finally {
+    await page.close();
+  }
+}
+
+async function captureViewerRoute(page, route, routePrefix, routeTimeoutMs) {
+  const response = await page.goto(new URL(route.path, baseUrl).toString(), {
+    waitUntil: 'domcontentloaded',
+    timeout: routeTimeoutMs
+  });
+
+  await page.waitForSelector('.viewer-page', { timeout: routeTimeoutMs });
+  await page.waitForFunction(() => {
+    const viewer = document.querySelector('.viewer-page');
+    if (!viewer) return false;
+    const status = viewer.getAttribute('data-feed-status') ?? '';
+    return status === 'ready' || status.startsWith('error:');
+  }, { timeout: routeTimeoutMs });
+
+  await waitForOptionalSelector(
+    page,
+    '.media-img.loaded, .media-video, .media-error, .media-unknown, .error',
+    5000
+  );
+
+  await page.mouse.move(120, 120);
+
+  const initialState = await page.evaluate(collectViewerState);
+  const primaryScreenshotPath = `${routePrefix}.png`;
+  await page.screenshot({ path: primaryScreenshotPath, fullPage: true });
+
+  let interaction = null;
+  if (initialState.feedStatus === 'ready') {
+    interaction = await exerciseViewerAdvance(page, routePrefix);
+  }
+
+  return {
+    ok: initialState.feedStatus === 'ready' && (interaction?.ok ?? true),
+    response: serializeResponse(response),
+    locationPath: initialState.locationPath,
+    state: initialState,
+    interaction,
+    primaryScreenshot: relativePath(primaryScreenshotPath)
+  };
+}
+
+async function captureDiscoverRoute(page, route, routePrefix, routeTimeoutMs) {
+  const response = await page.goto(new URL(route.path, baseUrl).toString(), {
+    waitUntil: 'domcontentloaded',
+    timeout: routeTimeoutMs
+  });
+
+  await page.waitForSelector('.discover-page', { timeout: routeTimeoutMs });
+  await page.waitForFunction(() => {
+    const pageRoot = document.querySelector('.discover-page');
+    if (!pageRoot) return false;
+    return !document.querySelector('.loading');
+  }, { timeout: routeTimeoutMs });
+
+  const state = await page.evaluate(() => ({
+    locationPath: window.location.pathname,
+    documentTitle: document.title,
+    suggestionCount: document.querySelectorAll('.suggestion-card').length,
+    subredditCount: document.querySelectorAll('.sub-row').length,
+    emptyVisible: Boolean(document.querySelector('.empty')),
+    loadingVisible: Boolean(document.querySelector('.loading'))
+  }));
+
+  const primaryScreenshotPath = `${routePrefix}.png`;
+  await page.screenshot({ path: primaryScreenshotPath, fullPage: true });
+
+  return {
+    ok: !state.loadingVisible,
+    response: serializeResponse(response),
+    locationPath: state.locationPath,
+    state,
+    primaryScreenshot: relativePath(primaryScreenshotPath)
+  };
+}
+
+async function captureAdminRoute(page, route, routePrefix, routeTimeoutMs) {
+  const response = await page.goto(new URL(route.path, baseUrl).toString(), {
+    waitUntil: 'domcontentloaded',
+    timeout: routeTimeoutMs
+  });
+
+  await page.waitForSelector('.admin-page', { timeout: routeTimeoutMs });
+  await page.waitForFunction(() => {
+    const pageRoot = document.querySelector('.admin-page');
+    if (!pageRoot) return false;
+    return !document.querySelector('.loading');
+  }, { timeout: routeTimeoutMs });
+
+  const state = await page.evaluate(() => ({
+    locationPath: window.location.pathname,
+    documentTitle: document.title,
+    activeTab: document.querySelector('.tab.active')?.textContent?.trim() ?? null,
+    loadingVisible: Boolean(document.querySelector('.loading')),
+    statCards: Array.from(document.querySelectorAll('.stat-card')).map((card) => ({
+      label: card.querySelector('.stat-label')?.textContent?.trim() ?? null,
+      value: card.querySelector('.stat-value')?.textContent?.trim() ?? null
+    }))
+  }));
+
+  const primaryScreenshotPath = `${routePrefix}.png`;
+  await page.screenshot({ path: primaryScreenshotPath, fullPage: true });
+
+  return {
+    ok: !state.loadingVisible,
+    response: serializeResponse(response),
+    locationPath: state.locationPath,
+    state,
+    primaryScreenshot: relativePath(primaryScreenshotPath)
+  };
+}
+
+async function exerciseViewerAdvance(page, routePrefix) {
+  const beforeCounter = await page.locator('.counter').textContent();
+  const [currentIndex, totalPosts] = parseCounter(beforeCounter);
+  if (!totalPosts || totalPosts <= currentIndex) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'Only one visible post was available in the current capture.'
+    };
+  }
+
+  try {
+    await page.locator('.overlay').hover();
+    await page.locator('.nav-btn.next').click();
+    await page.waitForFunction(
+      (counterText) => document.querySelector('.counter')?.textContent?.trim() !== counterText,
+      { timeout: 10000 },
+      beforeCounter?.trim() ?? ''
+    );
+    await delay(750);
+
+    const afterState = await page.evaluate(collectViewerState);
+    const screenshotPath = `${routePrefix}-after-next.png`;
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+
+    return {
+      ok: afterState.counter !== beforeCounter?.trim(),
+      beforeCounter: beforeCounter?.trim() ?? null,
+      afterCounter: afterState.counter,
+      afterState,
+      screenshot: relativePath(screenshotPath)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      beforeCounter: beforeCounter?.trim() ?? null,
+      error: serializeError(error)
+    };
+  }
+}
+
+function collectViewerState() {
+  const viewer = document.querySelector('.viewer-page');
+  const counter = document.querySelector('.counter')?.textContent?.trim() ?? null;
+  return {
+    locationPath: window.location.pathname,
+    documentTitle: document.title,
+    feedStatus: viewer?.getAttribute('data-feed-status') ?? null,
+    counter,
+    postTitle: document.querySelector('.post-title')?.textContent?.trim() ?? null,
+    subreddit: document.querySelector('.subreddit')?.textContent?.trim() ?? null,
+    hasImage: Boolean(document.querySelector('img.media-img')),
+    hasVideo: Boolean(document.querySelector('video.media-video')),
+    mediaErrorVisible: Boolean(document.querySelector('.media-error')),
+    errorTitle: document.querySelector('.error-title')?.textContent?.trim() ?? null,
+    errorSummary: document.querySelector('.error-summary')?.textContent?.trim() ?? null,
+    loadingVisible: Boolean(document.querySelector('.loading')),
+    emptyVisible: Boolean(document.querySelector('.empty'))
+  };
+}
+
+function parseCounter(counterText) {
+  const match = counterText?.match(/(\d+)\s*\/\s*(\d+)/);
+  if (!match) return [0, 0];
+  return [Number.parseInt(match[1], 10), Number.parseInt(match[2], 10)];
+}
+
+async function waitForOptionalSelector(page, selector, timeout) {
+  try {
+    await page.waitForSelector(selector, { timeout });
+  } catch {
+    // Optional readiness only.
+  }
+}
+
+function startDevServer(hostValue, portValue) {
+  const child = spawn('npm', ['run', 'dev', '--', '--host', hostValue, '--port', String(portValue)], {
+    cwd: process.cwd(),
+    env: { ...process.env, BROWSER: 'none' },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  child.stdout.on('data', (chunk) => {
+    serverLogs.push(chunk.toString());
+  });
+
+  child.stderr.on('data', (chunk) => {
+    serverLogs.push(chunk.toString());
+  });
+
+  return child;
+}
+
+async function waitForServer(url, timeout, child) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) {
+      throw new Error(`Dev server exited before becoming ready (code ${child.exitCode}).`);
+    }
+
+    try {
+      const response = await fetch(url);
+      if (response.ok) return;
+    } catch {
+      // Keep polling until the timeout expires.
+    }
+
+    await delay(500);
+  }
+
+  throw new Error(`Timed out waiting for ${url} after ${timeout}ms.`);
+}
+
+async function findChromeExecutable() {
+  for (const candidate of CHROME_CANDIDATES) {
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  throw new Error(
+    'Could not find a Chrome executable. Set CHROME_BIN to a local Chrome or Chromium binary.'
+  );
+}
+
+function serializeResponse(response) {
+  return response
+    ? {
+        url: response.url(),
+        status: response.status(),
+        ok: response.ok()
+      }
+    : null;
+}
+
+function serializeError(error) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    };
+  }
+
+  return { message: String(error) };
+}
+
+async function persistSummary() {
+  await writeFile(path.join(outputDir, 'summary.json'), JSON.stringify(summary, null, 2), 'utf8');
+}
+
+function relativePath(targetPath) {
+  return path.relative(process.cwd(), targetPath) || '.';
+}
+
+function getStringArg(flag, envValue, fallback) {
+  const argValue = readFlagValue(flag);
+  if (typeof argValue === 'string' && argValue.length > 0) return argValue;
+  if (typeof envValue === 'string' && envValue.length > 0) return envValue;
+  return fallback;
+}
+
+function getIntegerArg(flag, envValue, fallback) {
+  const rawValue = readFlagValue(flag) ?? envValue;
+  if (typeof rawValue !== 'string' || rawValue.trim() === '') return fallback;
+  const parsed = Number.parseInt(rawValue, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readFlagValue(flag) {
+  const index = args.indexOf(flag);
+  if (index === -1) return undefined;
+  return args[index + 1];
+}
+
+async function shutdown() {
+  if (browser) {
+    await browser.close();
+  }
+
+  if (devServer && devServer.exitCode === null) {
+    devServer.kill('SIGTERM');
+    await delay(500);
+    if (devServer.exitCode === null) {
+      devServer.kill('SIGKILL');
+    }
+  }
+}
+
+try {
+  await main();
+} catch (error) {
+  summary.finishedAt = new Date().toISOString();
+  summary.error = serializeError(error);
+  await persistSummary();
+  throw error;
+} finally {
+  await shutdown();
+}
