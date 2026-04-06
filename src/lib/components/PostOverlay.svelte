@@ -30,23 +30,28 @@
   } = $props();
 
   let showInfo = $state(true);
-  let hideTimer = $state<ReturnType<typeof setTimeout> | undefined>(undefined);
+  let hideTimer: ReturnType<typeof setTimeout> | undefined;
   const OVERLAY_HIDE_DELAY_MS = 3000;
   const OVERLAY_HOVER_HIDE_DELAY_MS = 4000;
+
+  function resetHideTimer(delayMs: number) {
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+      showInfo = false;
+    }, delayMs);
+  }
 
   $effect(() => {
     // Reset timer whenever post changes
     void post.id;
     showInfo = true;
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => { showInfo = false; }, OVERLAY_HIDE_DELAY_MS);
+    resetHideTimer(OVERLAY_HIDE_DELAY_MS);
     return () => clearTimeout(hideTimer);
   });
 
   function showOverlay() {
     showInfo = true;
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => { showInfo = false; }, OVERLAY_HOVER_HIDE_DELAY_MS);
+    resetHideTimer(OVERLAY_HOVER_HIDE_DELAY_MS);
   }
 
   const rating = $derived(post.localRating);
