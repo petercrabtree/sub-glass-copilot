@@ -16,6 +16,7 @@
 		"smoke:headless:loop": "node scripts/headless-smoke.mjs --loop"
 	},
 	"devDependencies": {
+		"@esbuild/win32-x64": "^0.28.0",
 		"@sveltejs/kit": "^2.50.2",
 		"@sveltejs/vite-plugin-svelte": "^6.2.4",
 		"puppeteer-core": "^24.40.0",
