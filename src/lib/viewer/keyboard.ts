@@ -1,14 +1,23 @@
 export type ViewerShortcutAction =
+  | 'skip_backward'
+  | 'skip_forward'
   | 'step_backward'
   | 'step_forward'
   | 'open_reddit'
   | 'open_media'
   | 'rate_up'
-  | 'rate_down';
+  | 'rate_down'
+  | 'toggle_auto_forward'
+  | 'display_fill'
+  | 'display_scroll'
+  | 'display_masonry'
+  | 'display_wild'
+  | 'display_wild2'
+  | 'display_wild3';
 
 export interface ViewerShortcut {
   action: ViewerShortcutAction;
-  group: 'Navigate' | 'Actions';
+  group: 'Navigate' | 'Actions' | 'Display';
   description: string;
   displayKeys: readonly string[];
   matchKeys: readonly string[];
@@ -17,19 +26,35 @@ export interface ViewerShortcut {
 
 const VIEWER_SHORTCUTS: readonly ViewerShortcut[] = [
   {
+    action: 'skip_backward',
+    group: 'Navigate',
+    description: 'Previous post',
+    displayKeys: ['\u2190', 'H'],
+    matchKeys: ['ArrowLeft', 'h'],
+    preventDefault: true,
+  },
+  {
+    action: 'skip_forward',
+    group: 'Navigate',
+    description: 'Next post',
+    displayKeys: ['\u2192', 'L'],
+    matchKeys: ['ArrowRight', 'l'],
+    preventDefault: true,
+  },
+  {
     action: 'step_backward',
     group: 'Navigate',
     description: 'Previous gallery item or post',
-    displayKeys: ['\u2190', 'H', '\u2191', 'K'],
-    matchKeys: ['ArrowLeft', 'h', 'ArrowUp', 'k'],
+    displayKeys: ['\u2191', 'K'],
+    matchKeys: ['ArrowUp', 'k'],
     preventDefault: true,
   },
   {
     action: 'step_forward',
     group: 'Navigate',
     description: 'Next gallery item or post',
-    displayKeys: ['\u2192', 'L', '\u2193', 'J', 'Space'],
-    matchKeys: ['ArrowRight', 'l', 'ArrowDown', 'j', 'space'],
+    displayKeys: ['\u2193', 'J', 'Space'],
+    matchKeys: ['ArrowDown', 'j', 'space'],
     preventDefault: true,
   },
   {
@@ -50,15 +75,64 @@ const VIEWER_SHORTCUTS: readonly ViewerShortcut[] = [
     action: 'rate_up',
     group: 'Actions',
     description: 'Rate up',
-    displayKeys: ['U'],
-    matchKeys: ['u'],
+    displayKeys: ['W', 'U'],
+    matchKeys: ['w', 'u'],
   },
   {
     action: 'rate_down',
     group: 'Actions',
     description: 'Rate down',
-    displayKeys: ['D'],
-    matchKeys: ['d'],
+    displayKeys: ['S', 'D'],
+    matchKeys: ['s', 'd'],
+  },
+  {
+    action: 'toggle_auto_forward',
+    group: 'Actions',
+    description: 'Pause or resume auto-next',
+    displayKeys: ['P'],
+    matchKeys: ['p'],
+  },
+  {
+    action: 'display_fill',
+    group: 'Display',
+    description: 'Switch to fill view',
+    displayKeys: ['1'],
+    matchKeys: ['1'],
+  },
+  {
+    action: 'display_scroll',
+    group: 'Display',
+    description: 'Switch to vertical scroll',
+    displayKeys: ['2'],
+    matchKeys: ['2'],
+  },
+  {
+    action: 'display_masonry',
+    group: 'Display',
+    description: 'Switch to masonry wall',
+    displayKeys: ['3'],
+    matchKeys: ['3'],
+  },
+  {
+    action: 'display_wild',
+    group: 'Display',
+    description: 'Switch to wild mode',
+    displayKeys: ['4'],
+    matchKeys: ['4'],
+  },
+  {
+    action: 'display_wild2',
+    group: 'Display',
+    description: 'Switch to wild2 mode',
+    displayKeys: ['5'],
+    matchKeys: ['5'],
+  },
+  {
+    action: 'display_wild3',
+    group: 'Display',
+    description: 'Switch to wild3 mode',
+    displayKeys: ['6'],
+    matchKeys: ['6'],
   },
 ] as const;
 
@@ -72,7 +146,7 @@ const viewerActionByKey = new Map< string, ViewerShortcutAction >(
   )
 );
 
-export const VIEWER_SHORTCUT_GROUPS = ['Navigate', 'Actions'].map((group) => ({
+export const VIEWER_SHORTCUT_GROUPS = ['Navigate', 'Actions', 'Display'].map((group) => ({
   title: group,
   shortcuts: VIEWER_SHORTCUTS.filter((shortcut) => shortcut.group === group),
 }));

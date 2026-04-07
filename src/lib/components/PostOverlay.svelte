@@ -85,9 +85,17 @@
     resetHideTimer(OVERLAY_HOVER_HIDE_DELAY_MS);
   }
 
+  function hideOverlay() {
+    clearTimeout(hideTimer);
+    showInfo = false;
+    activeZoneId = null;
+  }
+
   const rating = $derived(post.localRating);
-  const backShortcut = formatViewerShortcutKeys('step_backward');
-  const forwardShortcut = formatViewerShortcutKeys('step_forward');
+  const stepBackShortcut = formatViewerShortcutKeys('step_backward');
+  const stepForwardShortcut = formatViewerShortcutKeys('step_forward');
+  const skipBackShortcut = formatViewerShortcutKeys('skip_backward');
+  const skipForwardShortcut = formatViewerShortcutKeys('skip_forward');
   const redditShortcut = formatViewerShortcutKeys('open_reddit');
   const mediaShortcut = formatViewerShortcutKeys('open_media');
   const rateUpShortcut = formatViewerShortcutKeys('rate_up');
@@ -98,12 +106,12 @@
     {
       id: 'top-left',
       className: 'top-left',
-      glyph: canMoveGalleryBack ? '↑' : '←',
+      glyph: '↑',
       action: canMoveGalleryBack ? 'gallery_back' : 'retreat',
       label: canMoveGalleryBack ? 'Previous gallery item' : 'Previous post',
       title: canMoveGalleryBack
-        ? `Previous gallery item (${backShortcut})`
-        : `Previous post (${backShortcut})`,
+        ? `Previous gallery item (${stepBackShortcut})`
+        : `Previous post (${stepBackShortcut})`,
     },
     {
       id: 'top',
@@ -111,17 +119,17 @@
       glyph: '↑',
       action: canMoveGalleryBack ? 'gallery_back' : 'none',
       label: 'Previous gallery item',
-      title: canMoveGalleryBack ? `Previous gallery item (${backShortcut})` : undefined,
+      title: canMoveGalleryBack ? `Previous gallery item (${stepBackShortcut})` : undefined,
     },
     {
       id: 'top-right',
       className: 'top-right',
-      glyph: canMoveGalleryBack ? '↑' : '→',
-      action: canMoveGalleryBack ? 'gallery_back' : 'advance',
-      label: canMoveGalleryBack ? 'Previous gallery item' : 'Next post',
+      glyph: '↑',
+      action: canMoveGalleryBack ? 'gallery_back' : 'retreat',
+      label: canMoveGalleryBack ? 'Previous gallery item' : 'Previous post',
       title: canMoveGalleryBack
-        ? `Previous gallery item (${backShortcut})`
-        : `Next post (${forwardShortcut})`,
+        ? `Previous gallery item (${stepBackShortcut})`
+        : `Previous post (${stepBackShortcut})`,
     },
     {
       id: 'left',
@@ -129,7 +137,7 @@
       glyph: '←',
       action: 'retreat',
       label: 'Previous post',
-      title: `Previous post (${backShortcut})`,
+      title: `Previous post (${skipBackShortcut})`,
     },
     {
       id: 'right',
@@ -137,17 +145,17 @@
       glyph: '→',
       action: 'advance',
       label: 'Next post',
-      title: `Next post (${forwardShortcut})`,
+      title: `Next post (${skipForwardShortcut})`,
     },
     {
       id: 'bottom-left',
       className: 'bottom-left',
-      glyph: canMoveGalleryForward ? '↓' : '←',
-      action: canMoveGalleryForward ? 'gallery_forward' : 'retreat',
-      label: canMoveGalleryForward ? 'Next gallery item' : 'Previous post',
+      glyph: '↓',
+      action: canMoveGalleryForward ? 'gallery_forward' : 'advance',
+      label: canMoveGalleryForward ? 'Next gallery item' : 'Next post',
       title: canMoveGalleryForward
-        ? `Next gallery item (${forwardShortcut})`
-        : `Previous post (${backShortcut})`,
+        ? `Next gallery item (${stepForwardShortcut})`
+        : `Next post (${stepForwardShortcut})`,
     },
     {
       id: 'bottom',
@@ -155,17 +163,17 @@
       glyph: '↓',
       action: canMoveGalleryForward ? 'gallery_forward' : 'none',
       label: 'Next gallery item',
-      title: canMoveGalleryForward ? `Next gallery item (${forwardShortcut})` : undefined,
+      title: canMoveGalleryForward ? `Next gallery item (${stepForwardShortcut})` : undefined,
     },
     {
       id: 'bottom-right',
       className: 'bottom-right',
-      glyph: canMoveGalleryForward ? '↓' : '→',
+      glyph: '↓',
       action: canMoveGalleryForward ? 'gallery_forward' : 'advance',
       label: canMoveGalleryForward ? 'Next gallery item' : 'Next post',
       title: canMoveGalleryForward
-        ? `Next gallery item (${forwardShortcut})`
-        : `Next post (${forwardShortcut})`,
+        ? `Next gallery item (${stepForwardShortcut})`
+        : `Next post (${stepForwardShortcut})`,
     },
   ]);
 
@@ -215,8 +223,6 @@
   }
 
   function handleOverlayMouseMove(event: MouseEvent) {
-    showOverlay();
-
     const rect = overlayEl?.getBoundingClientRect();
     if (!rect) return;
 
@@ -236,11 +242,25 @@
       }
     }
 
-    activeZoneId = closestZoneId;
+    const activationRadius = Math.min(rect.width, rect.height) * 0.28;
+    const topRevealBand = Math.min(118, rect.height * 0.18);
+    const bottomRevealBand = Math.min(138, rect.height * 0.22);
+    const revealUi =
+      closestDistance <= activationRadius ||
+      pointerY <= topRevealBand ||
+      pointerY >= rect.height - bottomRevealBand;
+
+    if (!revealUi) {
+      hideOverlay();
+      return;
+    }
+
+    showOverlay();
+    activeZoneId = closestDistance <= activationRadius ? closestZoneId : null;
   }
 
   function handleOverlayMouseLeave() {
-    activeZoneId = null;
+    hideOverlay();
   }
 
   function getZoneAnchor(zoneId: string, width: number, height: number) {
@@ -432,10 +452,10 @@
     pointer-events: all;
     opacity: 0;
     transition: opacity 0.3s;
-    padding: 12px 16px;
+    padding: 8px 10px;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex-wrap: wrap;
     position: relative;
     z-index: 3;
@@ -453,20 +473,20 @@
   .bottom-bar.visible {
     opacity: 1;
   }
-  .counter { font-size: 0.8rem; color: #aaa; }
-  .gallery-counter { font-size: 0.8rem; color: #888; }
+  .counter { font-size: 0.7rem; color: #aaa; }
+  .gallery-counter { font-size: 0.7rem; color: #888; }
   .top-bar-spacer {
     flex: 1;
     min-width: 0;
   }
   .seen-badge {
-    font-size: 0.7rem;
+    font-size: 0.62rem;
     background: rgba(255, 255, 255, 0.15);
     padding: 2px 6px;
     border-radius: 3px;
     color: #aaa;
   }
-  .subreddit { font-size: 0.8rem; color: #6ab0de; }
+  .subreddit { font-size: 0.72rem; color: #6ab0de; }
   .utility-cluster {
     display: flex;
     align-items: center;
@@ -480,8 +500,8 @@
   .help-chip {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 8px;
+    gap: 6px;
+    padding: 4px 7px;
     cursor: help;
     border-radius: 999px;
     border: 1px solid rgba(255, 255, 255, 0.08);
@@ -497,7 +517,7 @@
     outline-offset: 2px;
   }
   .utility-label {
-    font-size: 0.68rem;
+    font-size: 0.62rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: #9d9d9d;
@@ -592,7 +612,7 @@
   }
   .panel-copy {
     margin: 8px 0 0;
-    font-size: 0.8rem;
+    font-size: 0.74rem;
     color: #cbcbcb;
     line-height: 1.35;
   }
@@ -607,7 +627,7 @@
     margin-top: 12px;
   }
   .legend-text {
-    font-size: 0.8rem;
+    font-size: 0.74rem;
     color: #d7d7d7;
   }
   .shortcuts-panel {
@@ -624,7 +644,7 @@
     display: flex;
     justify-content: space-between;
     gap: 16px;
-    font-size: 0.82rem;
+    font-size: 0.76rem;
     color: #d7d7d7;
   }
   .shortcut-copy {
@@ -637,27 +657,27 @@
   }
   .post-info { width: 100%; }
   .post-title {
-    font-size: 0.9rem;
+    font-size: 0.78rem;
     font-weight: 500;
     color: #e0e0e0;
     line-height: 1.3;
-    max-width: 600px;
+    max-width: 520px;
   }
   .post-meta {
-    font-size: 0.75rem;
+    font-size: 0.68rem;
     color: #888;
     margin-top: 4px;
     display: flex;
     gap: 6px;
   }
   .flair { color: #aaa; }
-  .controls { display: flex; gap: 8px; }
+  .controls { display: flex; gap: 6px; }
   .btn-icon {
     background: rgba(255, 255, 255, 0.1);
     border: none;
-    padding: 6px 10px;
+    padding: 5px 8px;
     border-radius: 6px;
-    font-size: 1rem;
+    font-size: 0.92rem;
     color: #e0e0e0;
     pointer-events: all;
     transition: background 0.15s;
@@ -668,8 +688,8 @@
     position: absolute;
     inset: 0;
     display: grid;
-    grid-template-columns: minmax(124px, 26vw) 1fr minmax(124px, 26vw);
-    grid-template-rows: minmax(96px, 21vh) 1fr minmax(96px, 21vh);
+    grid-template-columns: minmax(108px, 24vw) 1fr minmax(108px, 24vw);
+    grid-template-rows: minmax(84px, 18vh) 1fr minmax(84px, 18vh);
     grid-template-areas:
       'top-left top top-right'
       'left . right'
@@ -728,53 +748,52 @@
     align-items: flex-end;
   }
   .nav-zone.top-left::before {
-    background: radial-gradient(circle at top left, rgba(255, 255, 255, 0.08), transparent 62%);
+    background: radial-gradient(circle at top left, rgba(255, 255, 255, 0.045), transparent 60%);
   }
   .nav-zone.top::before {
-    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.06), transparent 72%);
+    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.035), transparent 70%);
   }
   .nav-zone.top-right::before {
-    background: radial-gradient(circle at top right, rgba(255, 255, 255, 0.08), transparent 62%);
+    background: radial-gradient(circle at top right, rgba(255, 255, 255, 0.045), transparent 60%);
   }
   .nav-zone.left::before {
-    background: linear-gradient(to right, rgba(255, 255, 255, 0.06), transparent 72%);
+    background: linear-gradient(to right, rgba(255, 255, 255, 0.035), transparent 70%);
   }
   .nav-zone.right::before {
-    background: linear-gradient(to left, rgba(255, 255, 255, 0.06), transparent 72%);
+    background: linear-gradient(to left, rgba(255, 255, 255, 0.035), transparent 70%);
   }
   .nav-zone.bottom-left::before {
-    background: radial-gradient(circle at bottom left, rgba(255, 255, 255, 0.08), transparent 62%);
+    background: radial-gradient(circle at bottom left, rgba(255, 255, 255, 0.045), transparent 60%);
   }
   .nav-zone.bottom::before {
-    background: linear-gradient(to top, rgba(255, 255, 255, 0.06), transparent 72%);
+    background: linear-gradient(to top, rgba(255, 255, 255, 0.035), transparent 70%);
   }
   .nav-zone.bottom-right::before {
-    background: radial-gradient(circle at bottom right, rgba(255, 255, 255, 0.08), transparent 62%);
+    background: radial-gradient(circle at bottom right, rgba(255, 255, 255, 0.045), transparent 60%);
   }
   .nav-zone[data-active='true']::before,
   .nav-zone:hover::before,
   .nav-zone:focus-visible::before {
-    opacity: 0.92;
+    opacity: 0.56;
   }
   .zone-glyph {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 34px;
-    min-height: 34px;
-    color: rgba(233, 233, 233, 0.34);
-    font-size: 1.5rem;
+    min-width: 28px;
+    min-height: 28px;
+    color: rgba(233, 233, 233, 0.2);
+    font-size: 1.2rem;
     line-height: 1;
     transition: color 0.18s ease, transform 0.18s ease, text-shadow 0.18s ease;
-    text-shadow: 0 0 10px rgba(0, 0, 0, 0.24);
+    text-shadow: 0 0 8px rgba(0, 0, 0, 0.18);
   }
   .nav-zone[data-active='true'] .zone-glyph,
   .nav-zone:not(:disabled):hover .zone-glyph,
   .nav-zone:not(:disabled):focus-visible .zone-glyph {
-    color: rgba(233, 233, 233, 0.84);
-    transform: scale(1.08);
-    text-shadow: 0 0 18px rgba(255, 255, 255, 0.12);
-    animation: nav-pulse 1.7s ease-in-out infinite;
+    color: rgba(233, 233, 233, 0.58);
+    transform: scale(1.03);
+    text-shadow: 0 0 14px rgba(255, 255, 255, 0.08);
   }
   .nav-zone:disabled .zone-glyph {
     color: rgba(233, 233, 233, 0.08);
@@ -783,15 +802,6 @@
   @keyframes loading-pulse {
     0%, 100% {
       opacity: 0.6;
-    }
-    50% {
-      opacity: 1;
-    }
-  }
-
-  @keyframes nav-pulse {
-    0%, 100% {
-      opacity: 0.78;
     }
     50% {
       opacity: 1;
@@ -810,8 +820,8 @@
       margin-right: auto;
     }
     .nav-grid {
-      grid-template-columns: minmax(88px, 28vw) 1fr minmax(88px, 28vw);
-      grid-template-rows: minmax(76px, 17vh) 1fr minmax(76px, 17vh);
+      grid-template-columns: minmax(76px, 26vw) 1fr minmax(76px, 26vw);
+      grid-template-rows: minmax(64px, 15vh) 1fr minmax(64px, 15vh);
     }
     .nav-zone {
       padding: 12px;
