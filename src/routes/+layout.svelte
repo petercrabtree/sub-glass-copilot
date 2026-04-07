@@ -2,13 +2,17 @@
   import { dev } from '$app/environment';
   import { onMount } from 'svelte';
   import { startDevErrorReporter } from '$lib/dev/error-reporter';
+  import { registerServiceWorker } from '$lib/service-worker/register';
   import '../app.css';
 
   let { children } = $props();
 
   onMount(() => {
-    if (!dev) return;
-    return startDevErrorReporter();
+    const stopDevErrorReporter = dev ? startDevErrorReporter() : undefined;
+
+    registerServiceWorker();
+
+    return () => stopDevErrorReporter?.();
   });
 </script>
 

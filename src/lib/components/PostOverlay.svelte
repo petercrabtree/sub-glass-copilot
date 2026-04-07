@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { MediaKind, PostRecord } from '$lib/types';
+  import type { MediaCacheRuntimeState, MediaCacheState } from '$lib/service-worker/media-cache';
   import {
     VIEWER_SHORTCUT_GROUPS,
     formatViewerShortcutKeys,
@@ -14,6 +15,18 @@
     title?: string;
     label: string;
   };
+  type LoadedMediaItem = {
+    id: string;
+    index: number;
+    kind: MediaKind | 'unknown';
+    title: string;
+    itemCount: number;
+    rating?: 1 | -1;
+    status: 'queued' | 'seen' | 'loading' | 'ready' | 'error';
+    previewUrl?: string;
+    cacheUrl?: string;
+    cacheState: MediaCacheState;
+  };
 
   let {
     post,
@@ -23,11 +36,13 @@
     postIndex = 0,
     totalPosts = 0,
     isSeen = false,
+    imageCacheMode = 'inactive',
     loadedMedia = [],
     onadvance,
     onretreat,
     onadvanceGallery,
     onretreatGallery,
+    onselectLoadedMedia,
     onrateUp,
     onrateDown,
     onopenReddit,
@@ -42,19 +57,13 @@
     postIndex?: number;
     totalPosts?: number;
     isSeen?: boolean;
-    loadedMedia?: Array<{
-      id: string;
-      index: number;
-      kind: MediaKind | 'unknown';
-      title: string;
-      itemCount: number;
-      rating?: 1 | -1;
-      status: 'queued' | 'seen' | 'loading' | 'ready' | 'error';
-    }>;
+    imageCacheMode?: MediaCacheRuntimeState;
+    loadedMedia?: LoadedMediaItem[];
     onadvance?: () => void;
     onretreat?: () => void;
     onadvanceGallery?: () => void;
     onretreatGallery?: () => void;
+    onselectLoadedMedia?: (index: number) => void;
     onrateUp?: () => void;
     onrateDown?: () => void;
     onopenReddit?: () => void;
@@ -64,7 +73,14 @@
   } = $props();
 
   let activeZoneId = $state<string | null>(null);
+  let previewedLoadItemId = $state<string | null>(null);
   let overlayEl = $state<HTMLDivElement | null>(null);
+
+  $effect(() => {
+    void post.id;
+    activeZoneId = null;
+    previewedLoadItemId = null;
+  });
 
   const rating = $derived(post.localRating);
   const stepBackShortcut = formatViewerShortcutKeys('step_backward');
@@ -77,6 +93,12 @@
   const rateDownShortcut = formatViewerShortcutKeys('rate_down');
   const canMoveGalleryBack = $derived(totalMedia > 1 && mediaIndex > 0);
   const canMoveGalleryForward = $derived(totalMedia > 1 && mediaIndex < totalMedia - 1);
+  const cacheableLoadedMediaCount = $derived(
+    loadedMedia.filter((item) => item.cacheState !== 'skipped').length
+  );
+  const cachedLoadedMediaCount = $derived(
+    loadedMedia.filter((item) => item.cacheState === 'cached').length
+  );
   const navZones = $derived<OverlayNavZone[]>([
     {
       id: 'top',
@@ -114,19 +136,38 @@
     },
   ]);
 
-  function describeLoadedMedia(item: {
-    index: number;
-    kind: MediaKind | 'unknown';
-    status: 'queued' | 'seen' | 'loading' | 'ready' | 'error';
-    itemCount: number;
-    rating?: 1 | -1;
-    title: string;
-  }) {
+  function formatLoadedMediaKind(kind: MediaKind | 'unknown') {
+    return kind.replaceAll('_', ' ');
+  }
+
+  function formatLoadedMediaCacheState(cacheState: MediaCacheState) {
+    switch (cacheState) {
+      case 'cached':
+        return 'cached';
+      case 'live':
+        return 'network';
+      case 'checking':
+        return 'checking';
+      case 'inactive':
+        return 'cache off';
+      case 'unsupported':
+        return 'unsupported';
+      case 'skipped':
+        return 'n/a';
+    }
+  }
+
+  function describeLoadedMedia(item: LoadedMediaItem) {
     const parts = [
       `#${item.index + 1}`,
-      item.kind.replaceAll('_', ' '),
+      formatLoadedMediaKind(item.kind),
       item.status,
     ];
+
+    const cacheStateLabel = formatLoadedMediaCacheState(item.cacheState);
+    if (cacheStateLabel !== 'n/a') {
+      parts.push(cacheStateLabel);
+    }
 
     if (item.itemCount > 1) {
       parts.push(`${item.itemCount} items`);
@@ -140,6 +181,23 @@
 
     parts.push(item.title);
     return parts.join(' · ');
+  }
+
+  function describeLoadedMediaCacheMode() {
+    switch (imageCacheMode) {
+      case 'ready':
+        return cacheableLoadedMediaCount > 0
+          ? `${cachedLoadedMediaCount}/${cacheableLoadedMediaCount} cached`
+          : 'cache ready';
+      case 'inactive':
+        return 'cache inactive';
+      case 'unsupported':
+        return 'cache unsupported';
+    }
+  }
+
+  function previewLoadedMediaItem(itemId: string | null) {
+    previewedLoadItemId = itemId;
   }
 
   function activateZone(action: OverlayNavAction) {
@@ -206,42 +264,118 @@
           <button
             type="button"
             class="load-cluster"
-            aria-label={`Loaded media rail showing ${loadedMedia.length} items`}
+            aria-label={`Loaded queue showing ${loadedMedia.length} items, ${describeLoadedMediaCacheMode()}`}
           >
-            <span class="utility-label">load</span>
+            <span class="utility-label">queue</span>
+            <span class="load-summary">{loadedMedia.length}</span>
+            <span class="cache-summary" data-cache-mode={imageCacheMode}>
+              {describeLoadedMediaCacheMode()}
+            </span>
             <span class="load-rail" aria-hidden="true">
               {#each loadedMedia as item (item.id)}
                 <span
                   class="load-chip"
                   class:rating-up={item.rating === 1}
                   class:rating-down={item.rating === -1}
+                  class:current={item.index === postIndex}
                   data-kind={item.kind}
                   data-status={item.status}
+                  data-cache={item.cacheState}
                   title={describeLoadedMedia(item)}
                 ></span>
               {/each}
             </span>
           </button>
-          <div class="hover-panel legend-panel">
-            <p class="panel-title">Loaded Media</p>
-            <p class="panel-copy">Queue overview for the media currently loaded into this feed.</p>
-            <div class="legend-grid">
-              <span class="legend-swatch" data-status="queued"></span>
-              <span class="legend-text">Queued</span>
-              <span class="legend-swatch" data-status="seen"></span>
-              <span class="legend-text">Seen</span>
-              <span class="legend-swatch" data-status="loading"></span>
-              <span class="legend-text">Current loading</span>
-              <span class="legend-swatch" data-status="ready"></span>
-              <span class="legend-text">Current ready</span>
-              <span class="legend-swatch" data-status="error"></span>
-              <span class="legend-text">Current error</span>
-              <span class="legend-swatch rating-up" data-status="queued"></span>
-              <span class="legend-text">Rated up</span>
-              <span class="legend-swatch rating-down" data-status="queued"></span>
-              <span class="legend-text">Rated down</span>
+          <div class="hover-panel queue-panel">
+            <div class="queue-panel-header">
+              <div class="queue-panel-copy">
+                <p class="panel-title">Loaded Queue</p>
+                <p class="panel-copy">
+                  Jump to any loaded post and hover a row to peek at its preview image.
+                </p>
+              </div>
+              <div class="queue-panel-summary">
+                <span class="summary-pill">{loadedMedia.length} loaded</span>
+                <span class="summary-pill" data-cache-mode={imageCacheMode}>
+                  {describeLoadedMediaCacheMode()}
+                </span>
+              </div>
             </div>
-            <p class="panel-copy muted">Hover a chip for the post number, media type, and title.</p>
+            {#if imageCacheMode === 'inactive'}
+              <p class="panel-copy muted">
+                The image cache becomes inspectable once the service worker controls this page. If it still shows inactive, use the admin cache tools to register or refresh the worker.
+              </p>
+            {:else if imageCacheMode === 'unsupported'}
+              <p class="panel-copy muted">
+                This browser does not expose Cache Storage inspection here.
+              </p>
+            {/if}
+            <div class="queue-list" role="list" aria-label="Loaded media queue">
+              {#each loadedMedia as item (item.id)}
+                <div class="queue-item-shell" role="listitem">
+                  <button
+                    type="button"
+                    class="queue-item"
+                    data-current={item.index === postIndex}
+                    data-status={item.status}
+                    data-cache={item.cacheState}
+                    aria-current={item.index === postIndex ? 'true' : undefined}
+                    aria-label={`Jump to ${describeLoadedMedia(item)}`}
+                    title={`Jump to ${describeLoadedMedia(item)}`}
+                    onclick={() => onselectLoadedMedia?.(item.index)}
+                    onmouseenter={() => previewLoadedMediaItem(item.id)}
+                    onmouseleave={() => previewLoadedMediaItem(null)}
+                    onfocus={() => previewLoadedMediaItem(item.id)}
+                    onblur={() => previewLoadedMediaItem(null)}
+                  >
+                    <span class="queue-item-leading">
+                      <span
+                        class="load-chip"
+                        class:rating-up={item.rating === 1}
+                        class:rating-down={item.rating === -1}
+                        class:current={item.index === postIndex}
+                        data-kind={item.kind}
+                        data-status={item.status}
+                        data-cache={item.cacheState}
+                      ></span>
+                      <span class="queue-index">{item.index + 1}</span>
+                    </span>
+                    <span class="queue-item-copy">
+                      <span class="queue-item-title">{item.title}</span>
+                      <span class="queue-item-meta">
+                        {formatLoadedMediaKind(item.kind)} · {item.status}
+                        {#if item.itemCount > 1}
+                          · {item.itemCount} items
+                        {/if}
+                        {#if item.rating === 1}
+                          · rated up
+                        {:else if item.rating === -1}
+                          · rated down
+                        {/if}
+                      </span>
+                    </span>
+                    <span class="queue-item-badges">
+                      {#if item.index === postIndex}
+                        <span class="queue-badge current">now</span>
+                      {/if}
+                      <span class="queue-badge cache" data-cache={item.cacheState}>
+                        {formatLoadedMediaCacheState(item.cacheState)}
+                      </span>
+                    </span>
+                    {#if previewedLoadItemId === item.id && item.previewUrl}
+                      <span class="queue-preview-popover">
+                        <img
+                          src={item.previewUrl}
+                          alt={`Preview for ${item.title}`}
+                          class="queue-preview-image"
+                          loading="lazy"
+                        />
+                      </span>
+                    {/if}
+                  </button>
+                </div>
+              {/each}
+            </div>
           </div>
         </div>
       {/if}
@@ -405,12 +539,17 @@
     align-items: center;
     gap: 6px;
     padding: 4px 7px;
-    cursor: help;
     border-radius: 999px;
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(12, 12, 12, 0.42);
     backdrop-filter: blur(12px);
     color: inherit;
+  }
+  .load-cluster {
+    cursor: pointer;
+  }
+  .help-chip {
+    cursor: help;
   }
   .load-cluster:focus-visible,
   .help-chip:focus-visible,
@@ -425,13 +564,25 @@
     text-transform: uppercase;
     color: #9d9d9d;
   }
+  .load-summary,
+  .cache-summary {
+    font-size: 0.66rem;
+    color: #d3dbe2;
+    font-variant-numeric: tabular-nums;
+  }
+  .cache-summary {
+    color: #93b8d4;
+  }
+  .cache-summary[data-cache-mode='inactive'],
+  .cache-summary[data-cache-mode='unsupported'] {
+    color: #9d9d9d;
+  }
   .load-rail {
     display: flex;
     align-items: center;
     gap: 4px;
   }
-  .load-chip,
-  .legend-swatch {
+  .load-chip {
     position: relative;
     display: inline-flex;
     width: 8px;
@@ -439,48 +590,57 @@
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.18);
     overflow: hidden;
+    transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
   }
   .load-chip[data-kind='gallery'] {
     width: 12px;
     border-radius: 4px;
   }
-  .load-chip[data-status='queued'],
-  .legend-swatch[data-status='queued'] {
+  .load-chip.current {
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
+  }
+  .load-chip[data-status='queued'] {
     background: rgba(255, 255, 255, 0.16);
   }
-  .load-chip[data-status='seen'],
-  .legend-swatch[data-status='seen'] {
+  .load-chip[data-status='seen'] {
     background: rgba(255, 255, 255, 0.34);
   }
-  .load-chip[data-status='loading'],
-  .legend-swatch[data-status='loading'] {
+  .load-chip[data-status='loading'] {
     background: rgba(214, 176, 103, 0.68);
   }
   .load-chip[data-status='loading'] {
     animation: loading-pulse 1.4s ease-in-out infinite;
   }
-  .load-chip[data-status='ready'],
-  .legend-swatch[data-status='ready'] {
+  .load-chip[data-status='ready'] {
     background: rgba(106, 176, 222, 0.82);
   }
-  .load-chip[data-status='error'],
-  .legend-swatch[data-status='error'] {
+  .load-chip[data-status='error'] {
     background: rgba(190, 101, 101, 0.82);
   }
-  .load-chip::after,
-  .legend-swatch::after {
+  .load-chip[data-cache='cached'] {
+    box-shadow: 0 0 0 1px rgba(113, 212, 136, 0.78);
+  }
+  .load-chip[data-cache='live'],
+  .load-chip[data-cache='checking'] {
+    opacity: 0.78;
+  }
+  .load-chip[data-cache='inactive'],
+  .load-chip[data-cache='unsupported'],
+  .load-chip[data-cache='skipped'] {
+    opacity: 0.52;
+  }
+  .load-chip::after {
     content: '';
     position: absolute;
     inset: auto 0 0;
     height: 3px;
     background: transparent;
   }
-  .load-chip.rating-up::after,
-  .legend-swatch.rating-up::after {
+  .load-chip.rating-up::after {
     background: #71d488;
   }
-  .load-chip.rating-down::after,
-  .legend-swatch.rating-down::after {
+  .load-chip.rating-down::after {
     background: #de7e7e;
   }
   .hover-panel {
@@ -504,6 +664,7 @@
   .hover-card-anchor:focus .hover-panel {
     opacity: 1;
     transform: translateY(0);
+    pointer-events: auto;
   }
   .panel-title,
   .shortcut-group-title {
@@ -522,16 +683,162 @@
   .panel-copy.muted {
     color: #9f9f9f;
   }
-  .legend-grid {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 8px 10px;
-    align-items: center;
-    margin-top: 12px;
+  .queue-panel {
+    min-width: min(92vw, 420px);
+    max-width: min(92vw, 460px);
+    overflow: visible;
   }
-  .legend-text {
-    font-size: 0.74rem;
-    color: #d7d7d7;
+  .queue-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .queue-panel-copy {
+    min-width: 0;
+  }
+  .queue-panel-summary {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .summary-pill,
+  .queue-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.05);
+    color: #d5dde5;
+    white-space: nowrap;
+  }
+  .summary-pill[data-cache-mode='ready'] {
+    color: #a7daf8;
+  }
+  .summary-pill[data-cache-mode='inactive'],
+  .summary-pill[data-cache-mode='unsupported'] {
+    color: #a3acb5;
+  }
+  .queue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+    max-height: min(56vh, 360px);
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .queue-item {
+    width: 100%;
+    position: relative;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.04);
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+  }
+  .queue-item:hover,
+  .queue-item:focus-visible {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(106, 176, 222, 0.28);
+    transform: translateY(-1px);
+  }
+  .queue-item:focus-visible {
+    outline: 2px solid rgba(106, 176, 222, 0.75);
+    outline-offset: 2px;
+  }
+  .queue-item[data-current='true'] {
+    background: rgba(106, 176, 222, 0.14);
+    border-color: rgba(106, 176, 222, 0.34);
+  }
+  .queue-item-leading {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .queue-index {
+    min-width: 2ch;
+    font-size: 0.72rem;
+    color: #9fb0be;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .queue-item-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .queue-item-title,
+  .queue-item-meta {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .queue-item-title {
+    font-size: 0.78rem;
+    color: #edf5fc;
+  }
+  .queue-item-meta {
+    font-size: 0.68rem;
+    color: #9fb0be;
+  }
+  .queue-item-badges {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    justify-self: end;
+  }
+  .queue-badge.current {
+    background: rgba(163, 226, 255, 0.92);
+    border-color: rgba(163, 226, 255, 0.92);
+    color: #051018;
+  }
+  .queue-badge.cache[data-cache='cached'] {
+    color: #8ce0a0;
+  }
+  .queue-badge.cache[data-cache='live'] {
+    color: #cbd5df;
+  }
+  .queue-badge.cache[data-cache='checking'] {
+    color: #e0c489;
+  }
+  .queue-badge.cache[data-cache='inactive'],
+  .queue-badge.cache[data-cache='unsupported'],
+  .queue-badge.cache[data-cache='skipped'] {
+    color: #9da6ae;
+  }
+  .queue-preview-popover {
+    position: absolute;
+    top: 50%;
+    right: calc(100% + 14px);
+    width: 156px;
+    aspect-ratio: 4 / 5;
+    transform: translateY(-50%);
+    padding: 6px;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(11, 13, 16, 0.96);
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+    pointer-events: none;
+  }
+  .queue-preview-image {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 10px;
   }
   .shortcuts-panel {
     display: flex;
@@ -707,6 +1014,26 @@
     .hover-panel {
       right: auto;
       left: 0;
+    }
+    .queue-panel {
+      min-width: min(88vw, 360px);
+    }
+    .queue-panel-header {
+      flex-direction: column;
+    }
+    .queue-panel-summary {
+      justify-content: flex-start;
+    }
+    .queue-item {
+      grid-template-columns: auto minmax(0, 1fr);
+    }
+    .queue-item-badges {
+      grid-column: 2;
+      justify-self: start;
+      flex-wrap: wrap;
+    }
+    .queue-preview-popover {
+      display: none;
     }
     .shortcut-row {
       flex-direction: column;

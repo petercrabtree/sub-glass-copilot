@@ -2,7 +2,7 @@
   import { dev } from '$app/environment';
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
-  import type { MediaGroup, MediaItem, PostRecord } from '$lib/types';
+  import type { MediaGroup, MediaItem, MediaKind, PostRecord } from '$lib/types';
   import { fetchListing, readRedditDebugState } from '$lib/transport/reddit';
   import type { RedditDebugState, RedditRequestError } from '$lib/transport/reddit';
   import { normalizeListingResponse } from '$lib/normalize/posts';
@@ -19,6 +19,13 @@
     getViewerShortcut,
     type ViewerShortcutAction,
   } from '$lib/viewer/keyboard';
+  import {
+    inspectCachedMediaUrls,
+    isInspectableMediaUrl,
+    subscribeToMediaCacheUpdates,
+    type MediaCacheRuntimeState,
+    type MediaCacheState,
+  } from '$lib/service-worker/media-cache';
 
   type LoadedMediaStatus = 'queued' | 'seen' | 'loading' | 'ready' | 'error';
   type DisplayMode = 'fill' | 'scroll' | 'masonry' | 'wild' | 'wild2' | 'wild3';
@@ -41,6 +48,18 @@
     height: number;
     masonryColSpan: number;
     masonryRowSpan: number;
+  };
+  type LoadedMediaQueueItem = {
+    id: string;
+    index: number;
+    kind: MediaKind | 'unknown';
+    title: string;
+    itemCount: number;
+    rating?: 1 | -1;
+    status: LoadedMediaStatus;
+    previewUrl?: string;
+    cacheUrl?: string;
+    cacheState: MediaCacheState;
   };
 
   const DISPLAY_MODE_STORAGE_KEY = 'subglass:display-mode';
@@ -93,6 +112,9 @@
   let lastRouteLoadKey = '';
   let viewerUiEngaged = $state(false);
   let viewerUiDisengageTimer: ReturnType<typeof setTimeout> | undefined;
+  let mediaCacheByUrl = $state<Record<string, boolean>>({});
+  let mediaCacheRuntime = $state<MediaCacheRuntimeState>('inactive');
+  let mediaCacheProbeGeneration = 0;
 
   function formatErrorJson(feedError: RedditRequestError): string {
     return JSON.stringify(feedError, null, 2);
@@ -147,6 +169,72 @@
     );
 
     return { masonryColSpan, masonryRowSpan, ...resolved };
+  }
+
+  function getLoadedMediaPreviewUrl(media: MediaGroup | undefined, selectedItemIndex = 0): string | undefined {
+    if (!media) return undefined;
+
+    const selectedItem = media.items[selectedItemIndex] ?? media.items[0];
+
+    if (media.kind === 'video') {
+      return media.thumbnailUrl;
+    }
+
+    if (media.kind === 'external_video') {
+      return media.thumbnailUrl ?? selectedItem?.url;
+    }
+
+    return selectedItem?.url ?? media.thumbnailUrl;
+  }
+
+  function getLoadedMediaCacheUrl(media: MediaGroup | undefined, selectedItemIndex = 0): string | undefined {
+    const previewUrl = getLoadedMediaPreviewUrl(media, selectedItemIndex);
+    return previewUrl && isInspectableMediaUrl(previewUrl) ? previewUrl : undefined;
+  }
+
+  function resolveLoadedMediaCacheState(cacheUrl: string | undefined): MediaCacheState {
+    if (!cacheUrl) return 'skipped';
+    if (mediaCacheRuntime === 'unsupported') return 'unsupported';
+    if (mediaCacheRuntime === 'inactive') return 'inactive';
+
+    const isCached = mediaCacheByUrl[cacheUrl];
+    return typeof isCached === 'boolean' ? (isCached ? 'cached' : 'live') : 'checking';
+  }
+
+  async function refreshMediaCacheRuntime() {
+    if (typeof window === 'undefined') return;
+
+    if (!('caches' in window)) {
+      mediaCacheRuntime = 'unsupported';
+      return;
+    }
+
+    if (!('serviceWorker' in navigator)) {
+      mediaCacheRuntime = 'inactive';
+      return;
+    }
+
+    const registration = await navigator.serviceWorker.getRegistration();
+    mediaCacheRuntime = registration?.active ? 'ready' : 'inactive';
+  }
+
+  async function probeLoadedMediaCache(urls: string[]) {
+    if (typeof window === 'undefined' || mediaCacheRuntime !== 'ready') return;
+
+    const probeUrls = [...new Set(urls.filter((url) => isInspectableMediaUrl(url)))];
+    if (probeUrls.length === 0) {
+      mediaCacheByUrl = {};
+      return;
+    }
+
+    const generation = ++mediaCacheProbeGeneration;
+    const cacheMatches = await inspectCachedMediaUrls(probeUrls);
+    if (generation !== mediaCacheProbeGeneration) return;
+
+    mediaCacheByUrl = {
+      ...mediaCacheByUrl,
+      ...cacheMatches,
+    };
   }
 
   function formatCountdown(ms: number | null | undefined): string {
@@ -362,9 +450,20 @@
     syncCurrentSelectionState();
   }
 
-  function selectPost(index: number) {
+  async function selectPost(index: number) {
+    if (index < 0 || index >= posts.length) return;
+
+    if (index === currentIndex) {
+      focusCurrentPostInActiveMode('smooth');
+      return;
+    }
+
+    const previousPost = currentPost;
     setDisplaySelection(index);
     focusCurrentPostInActiveMode('smooth');
+    await recordEvent('view_end', previousPost);
+    await recordEvent('impression', posts[index]);
+    await recordEvent('view_start', posts[index]);
 
     if (index >= posts.length - 5) {
       void loadMore();
@@ -445,7 +544,14 @@
     viewerUiEngaged ||
     (currentMedia?.kind === 'video' && currentVideoTiming?.paused === true)
   );
-  const loadedMediaStates = $derived(
+  const loadedMediaCacheUrls = $derived(
+    posts.flatMap((post, index) => {
+      const selectedItemIndex = index === currentIndex ? galleryIndex : 0;
+      const cacheUrl = getLoadedMediaCacheUrl(post.media, selectedItemIndex);
+      return cacheUrl ? [cacheUrl] : [];
+    })
+  );
+  const loadedMediaStates = $derived<LoadedMediaQueueItem[]>(
     posts.map((post, index) => {
       const status: LoadedMediaStatus =
         index === currentIndex
@@ -453,6 +559,9 @@
           : seenIds.has(post.id)
             ? 'seen'
             : 'queued';
+      const selectedItemIndex = index === currentIndex ? galleryIndex : 0;
+      const previewUrl = getLoadedMediaPreviewUrl(post.media, selectedItemIndex);
+      const cacheUrl = getLoadedMediaCacheUrl(post.media, selectedItemIndex);
 
       return {
         id: post.id,
@@ -462,6 +571,9 @@
         itemCount: post.media?.items.length ?? 0,
         rating: post.localRating,
         status,
+        previewUrl,
+        cacheUrl,
+        cacheState: resolveLoadedMediaCacheState(cacheUrl),
       };
     })
   );
@@ -585,6 +697,18 @@
     if (error) {
       debugExpanded = true;
     }
+  });
+
+  $effect(() => {
+    const cacheUrls = loadedMediaCacheUrls;
+    if (typeof window === 'undefined') return;
+
+    if (mediaCacheRuntime !== 'ready') {
+      mediaCacheByUrl = {};
+      return;
+    }
+
+    void probeLoadedMediaCache(cacheUrls);
   });
 
   $effect(() => {
@@ -1033,9 +1157,32 @@
       autoAdvancePaused = storedAutoAdvance.paused;
     }
 
+    void refreshMediaCacheRuntime();
+
+    const unsubscribeFromMediaCache = subscribeToMediaCacheUpdates((url) => {
+      mediaCacheByUrl = {
+        ...mediaCacheByUrl,
+        [url]: true,
+      };
+    });
+    const handleServiceWorkerControllerChange = () => {
+      void refreshMediaCacheRuntime();
+    };
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('controllerchange', handleServiceWorkerControllerChange);
+      void navigator.serviceWorker.ready.then(() => {
+        void refreshMediaCacheRuntime();
+      });
+    }
+
     window.addEventListener('keydown', handleKeydown);
 
     return () => {
+      unsubscribeFromMediaCache();
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('controllerchange', handleServiceWorkerControllerChange);
+      }
       window.removeEventListener('keydown', handleKeydown);
       cancelAnimationFrame(scrollSyncFrame);
       cancelAnimationFrame(masonrySyncFrame);
@@ -1125,10 +1272,12 @@
               totalPosts={posts.length}
               isSeen={isSeen}
               loadedMedia={loadedMediaStates}
+              imageCacheMode={mediaCacheRuntime}
               onadvance={advance}
               onretreat={retreat}
               onadvanceGallery={advanceGallery}
               onretreatGallery={retreatGallery}
+              onselectLoadedMedia={selectPost}
               onrateUp={rateUp}
               onrateDown={rateDown}
               onopenReddit={openReddit}
@@ -1358,10 +1507,12 @@
                 totalPosts={posts.length}
                 isSeen={isSeen}
                 loadedMedia={loadedMediaStates}
+                imageCacheMode={mediaCacheRuntime}
                 onadvance={advance}
                 onretreat={retreat}
                 onadvanceGallery={advanceGallery}
                 onretreatGallery={retreatGallery}
+                onselectLoadedMedia={selectPost}
                 onrateUp={rateUp}
                 onrateDown={rateDown}
                 onopenReddit={openReddit}

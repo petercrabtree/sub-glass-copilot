@@ -4,6 +4,15 @@
     getAllSubreddits, getAllPosts, getAllMedia, getAllEvents, getAllAdjacency,
     exportAllData, importAllData,
   } from '$lib/db/store';
+  import {
+    clearMediaCache,
+    getMediaCacheDiagnostics,
+    subscribeToMediaCacheUpdates,
+    unregisterMediaServiceWorker,
+    updateMediaServiceWorker,
+    type MediaCacheDiagnostics,
+  } from '$lib/service-worker/media-cache';
+  import { registerServiceWorker } from '$lib/service-worker/register';
   import type { SubredditRecord, PostRecord, SignalEvent, AdjacencyLink } from '$lib/types';
 
   let stats = $state({ subreddits: 0, posts: 0, media: 0, events: 0, adjacency: 0 });
@@ -11,15 +20,38 @@
   let posts = $state<PostRecord[]>([]);
   let events = $state<SignalEvent[]>([]);
   let adjacency = $state<AdjacencyLink[]>([]);
-  let activeTab = $state<'overview' | 'subreddits' | 'posts' | 'events' | 'adjacency'>('overview');
+  let mediaCache = $state<MediaCacheDiagnostics | null>(null);
+  let activeTab = $state<'overview' | 'cache' | 'subreddits' | 'posts' | 'events' | 'adjacency'>('overview');
   let importText = $state('');
   let importError = $state('');
   let importSuccess = $state(false);
+  let cacheMessage = $state('');
+  let cacheError = $state('');
+  let cacheBusyAction = $state<string | null>(null);
   let loading = $state(true);
 
-  onMount(async () => {
-    await loadData();
-    loading = false;
+  onMount(() => {
+    void Promise.all([loadData(), loadMediaCache()]).then(() => {
+      loading = false;
+    });
+
+    const unsubscribeFromMediaCache = subscribeToMediaCacheUpdates(() => {
+      void loadMediaCache();
+    });
+    const handleControllerChange = () => {
+      void loadMediaCache();
+    };
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('controllerchange', handleControllerChange);
+    }
+
+    return () => {
+      unsubscribeFromMediaCache();
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('controllerchange', handleControllerChange);
+      }
+    };
   });
 
   async function loadData() {
@@ -35,6 +67,10 @@
     posts = ps;
     events = evs.slice(-100).reverse();
     adjacency = adj.slice(0, 100);
+  }
+
+  async function loadMediaCache() {
+    mediaCache = await getMediaCacheDiagnostics();
   }
 
   async function doExport() {
@@ -62,6 +98,56 @@
     }
   }
 
+  async function runCacheAction(action: string, task: () => Promise<string>) {
+    cacheBusyAction = action;
+    cacheMessage = '';
+    cacheError = '';
+
+    try {
+      cacheMessage = await task();
+      await loadMediaCache();
+    } catch (error) {
+      cacheError = String(error);
+    } finally {
+      cacheBusyAction = null;
+    }
+  }
+
+  async function refreshCacheStatus() {
+    await runCacheAction('refresh', async () => {
+      await loadMediaCache();
+      return 'Cache status refreshed.';
+    });
+  }
+
+  async function clearImageCache() {
+    await runCacheAction('clear', async () => {
+      const cleared = await clearMediaCache();
+      return cleared ? 'Image cache cleared.' : 'Image cache was already empty or unavailable.';
+    });
+  }
+
+  async function updateImageWorker() {
+    await runCacheAction('update', async () => {
+      const updated = await updateMediaServiceWorker();
+      if (updated) return 'Service worker update requested.';
+
+      const registration = await registerServiceWorker();
+      return registration
+        ? 'Service worker registered.'
+        : 'Service worker registration is unavailable in this browser.';
+    });
+  }
+
+  async function unregisterImageWorker() {
+    await runCacheAction('unregister', async () => {
+      const unregistered = await unregisterMediaServiceWorker();
+      return unregistered
+        ? 'Service worker unregistered. Reload the page to fully detach it from this tab.'
+        : 'No service worker registration was present.';
+    });
+  }
+
   function handleFileImport(e: Event) {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
@@ -71,6 +157,16 @@
       importText = ev.target?.result as string || '';
     };
     reader.readAsText(file);
+  }
+
+  function formatCacheSampleUrl(url: string) {
+    try {
+      const parsed = new URL(url);
+      const path = `${parsed.hostname}${parsed.pathname}`;
+      return path.length > 72 ? `${path.slice(0, 72)}…` : path;
+    } catch {
+      return url;
+    }
   }
 </script>
 
@@ -90,7 +186,6 @@
     {#if loading}
       <div class="loading">Loading data…</div>
     {:else}
-      <!-- Stats Overview -->
       <div class="stats-grid">
         <div class="stat-card">
           <div class="stat-value">{stats.subreddits}</div>
@@ -112,11 +207,14 @@
           <div class="stat-value">{stats.adjacency}</div>
           <div class="stat-label">Adjacency Links</div>
         </div>
+        <div class="stat-card">
+          <div class="stat-value">{mediaCache?.entryCount ?? '—'}</div>
+          <div class="stat-label">Cached Images</div>
+        </div>
       </div>
 
-      <!-- Tabs -->
       <div class="tabs">
-        {#each (['overview', 'subreddits', 'posts', 'events', 'adjacency'] as const) as tab}
+        {#each (['overview', 'cache', 'subreddits', 'posts', 'events', 'adjacency'] as const) as tab}
           <button
             class="tab"
             class:active={activeTab === tab}
@@ -147,7 +245,95 @@
               {#if importSuccess}<p class="success">Import successful!</p>{/if}
               <button class="action-btn" onclick={doImport} disabled={!importText}>⬆️ Import JSON</button>
             </section>
+            <section>
+              <h2>Image Cache</h2>
+              <p>Inspect and reset the service worker image cache used by the viewer.</p>
+              <div class="cache-summary-grid">
+                <span class="field">cache api: <strong>{mediaCache?.cacheSupported ? 'yes' : 'no'}</strong></span>
+                <span class="field">worker api: <strong>{mediaCache?.serviceWorkerSupported ? 'yes' : 'no'}</strong></span>
+                <span class="field">registered: <strong>{mediaCache?.registrationActive ? 'yes' : 'no'}</strong></span>
+                <span class="field">controlling page: <strong>{mediaCache?.pageControlled ? 'yes' : 'no'}</strong></span>
+              </div>
+              <div class="cache-actions">
+                <button class="action-btn" onclick={refreshCacheStatus} disabled={cacheBusyAction !== null}>Refresh</button>
+                <button class="action-btn" onclick={clearImageCache} disabled={cacheBusyAction !== null}>Clear Cache</button>
+                <button class="action-btn" onclick={updateImageWorker} disabled={cacheBusyAction !== null}>Register / Update Worker</button>
+                <button class="action-btn action-btn--danger" onclick={unregisterImageWorker} disabled={cacheBusyAction !== null}>Unregister Worker</button>
+              </div>
+              {#if cacheMessage}<p class="success">{cacheMessage}</p>{/if}
+              {#if cacheError}<p class="error">{cacheError}</p>{/if}
+            </section>
           </div>
+
+        {:else if activeTab === 'cache'}
+          <section class="cache-panel">
+            <div class="cache-panel-header">
+              <div>
+                <h2>Image Cache / Service Worker</h2>
+                <p>
+                  Live cache diagnostics for this browser profile. Clear the image cache, update the worker, or unregister it here.
+                </p>
+              </div>
+              <div class="cache-actions">
+                <button class="action-btn" onclick={refreshCacheStatus} disabled={cacheBusyAction !== null}>Refresh</button>
+                <button class="action-btn" onclick={clearImageCache} disabled={cacheBusyAction !== null}>Clear Cache</button>
+                <button class="action-btn" onclick={updateImageWorker} disabled={cacheBusyAction !== null}>Register / Update Worker</button>
+                <button class="action-btn action-btn--danger" onclick={unregisterImageWorker} disabled={cacheBusyAction !== null}>Unregister Worker</button>
+              </div>
+            </div>
+
+            {#if cacheMessage}<p class="success">{cacheMessage}</p>{/if}
+            {#if cacheError}<p class="error">{cacheError}</p>{/if}
+
+            <div class="stats-grid cache-stats-grid">
+              <div class="stat-card">
+                <div class="stat-value">{mediaCache?.entryCount ?? 0}</div>
+                <div class="stat-label">Cached Images</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{mediaCache?.registrationActive ? 'yes' : 'no'}</div>
+                <div class="stat-label">Worker Registered</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{mediaCache?.pageControlled ? 'yes' : 'no'}</div>
+                <div class="stat-label">Controlling Page</div>
+              </div>
+            </div>
+
+            <div class="cache-detail-grid">
+              <div class="cache-detail-card">
+                <h3>Runtime</h3>
+                <div class="data-table">
+                  <div class="data-row"><span class="field">Cache Storage</span><span class="field"><strong>{mediaCache?.cacheSupported ? 'available' : 'unavailable'}</strong></span></div>
+                  <div class="data-row"><span class="field">Service Worker API</span><span class="field"><strong>{mediaCache?.serviceWorkerSupported ? 'available' : 'unavailable'}</strong></span></div>
+                  <div class="data-row"><span class="field">Registration</span><span class="field"><strong>{mediaCache?.registrationActive ? 'active' : 'missing'}</strong></span></div>
+                  <div class="data-row"><span class="field">Current tab</span><span class="field"><strong>{mediaCache?.pageControlled ? 'controlled' : 'not controlled'}</strong></span></div>
+                </div>
+              </div>
+              <div class="cache-detail-card">
+                <h3>Registration</h3>
+                <div class="data-table">
+                  <div class="data-row"><span class="field">Scope</span><span class="field meta">{mediaCache?.registrationScope ?? 'n/a'}</span></div>
+                  <div class="data-row"><span class="field">Script</span><span class="field meta">{mediaCache?.registrationScriptUrl ?? 'n/a'}</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="cache-detail-card">
+              <h3>Cached Requests</h3>
+              {#if mediaCache && mediaCache.sampleUrls.length > 0}
+                <div class="data-table">
+                  {#each mediaCache.sampleUrls as url}
+                    <div class="data-row">
+                      <span class="field meta">{formatCacheSampleUrl(url)}</span>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <p class="cache-meta">No cached image requests yet.</p>
+              {/if}
+            </div>
+          </section>
 
         {:else if activeTab === 'subreddits'}
           <div class="data-table">
@@ -217,7 +403,7 @@
   .nav-links { display: flex; gap: 12px; font-size: 0.85rem; }
   .nav-links a { color: #999; }
   .nav-links a:hover, .nav-links a.active { color: #e0e0e0; }
-  main { max-width: 900px; margin: 0 auto; padding: 32px 16px; }
+  main { max-width: 960px; margin: 0 auto; padding: 32px 16px; }
   h1 { font-size: 1.5rem; margin-bottom: 24px; }
   h2 { font-size: 1.1rem; margin-bottom: 8px; }
   .loading { color: #888; padding: 32px 0; }
@@ -231,7 +417,7 @@
   }
   .stat-value { font-size: 1.8rem; font-weight: 700; color: #6ab0de; }
   .stat-label { font-size: 0.75rem; color: #888; margin-top: 4px; }
-  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid #222; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid #222; flex-wrap: wrap; }
   .tab {
     background: none; border: none; color: #888; padding: 8px 16px;
     font-size: 0.9rem; cursor: pointer; border-bottom: 2px solid transparent;
@@ -240,12 +426,54 @@
   .tab:hover { color: #e0e0e0; }
   .tab.active { color: #6ab0de; border-bottom-color: #6ab0de; }
   .tab-content { min-height: 300px; }
-  .export-import { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+  .export-import { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+  .cache-panel { display: flex; flex-direction: column; gap: 20px; }
+  .cache-panel-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .cache-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 12px;
+    margin-bottom: 12px;
+  }
+  .cache-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .cache-stats-grid { margin-bottom: 0; }
+  .cache-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .cache-detail-card {
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .cache-detail-card h3 {
+    margin: 0 0 12px;
+    font-size: 1rem;
+  }
+  .cache-meta {
+    color: #666;
+    font-size: 0.8rem;
+    word-break: break-all;
+  }
   section p { color: #888; font-size: 0.85rem; margin-bottom: 12px; }
   .action-btn {
     background: #2a4a6a; color: #e0e0e0; border: none;
     padding: 8px 16px; border-radius: 4px; font-size: 0.9rem;
   }
+  .action-btn--danger { background: #6a3030; }
   .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .file-input { color: #888; font-size: 0.85rem; margin-bottom: 8px; display: block; }
   .import-textarea {
@@ -266,4 +494,13 @@
   .event-type { color: #aaa; font-weight: 500; min-width: 120px; }
   .arrow { color: #555; }
   .evidence { font-style: italic; }
+
+  @media (max-width: 860px) {
+    .export-import {
+      grid-template-columns: 1fr;
+    }
+    .cache-summary-grid {
+      grid-template-columns: 1fr;
+    }
+  }
 </style>
