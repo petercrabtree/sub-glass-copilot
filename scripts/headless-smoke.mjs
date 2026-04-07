@@ -332,7 +332,7 @@ async function captureViewerRoute(page, route, routePrefix, routeTimeoutMs) {
 
   await waitForOptionalSelector(
     page,
-    '.media-img.loaded, .media-video, .media-error, .media-unknown, .error',
+    '.media-img.loaded, .media-video, .media-embed-frame, .media-error, .media-unknown, .error',
     5000
   );
 
@@ -637,7 +637,7 @@ function collectViewerState() {
     postTitle: document.querySelector('.post-title')?.textContent?.trim() ?? null,
     subreddit: document.querySelector('.subreddit')?.textContent?.trim() ?? null,
     hasImage: Boolean(document.querySelector('img.media-img')),
-    hasVideo: Boolean(document.querySelector('video.media-video')),
+    hasVideo: Boolean(document.querySelector('video.media-video, iframe.media-embed-frame')),
     mediaErrorVisible: Boolean(document.querySelector('.media-error')),
     errorTitle: document.querySelector('.error-title')?.textContent?.trim() ?? null,
     errorSummary: document.querySelector('.error-summary')?.textContent?.trim() ?? null,

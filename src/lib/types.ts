@@ -30,6 +30,8 @@ export interface MediaItem {
   mimeType?: string;
   dashUrl?: string;
   hlsUrl?: string;
+  openUrl?: string;
+  embedUrl?: string;
 }
 
 export interface MediaGroup {
