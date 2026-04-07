@@ -17,6 +17,7 @@
 
   let {
     post,
+    chromeVisible = true,
     mediaIndex = 0,
     totalMedia = 1,
     postIndex = 0,
@@ -31,8 +32,11 @@
     onrateDown,
     onopenReddit,
     onopenMedia,
+    oncontrolenter,
+    oncontrolleave,
   }: {
     post: PostRecord;
+    chromeVisible?: boolean;
     mediaIndex?: number;
     totalMedia?: number;
     postIndex?: number;
@@ -55,41 +59,12 @@
     onrateDown?: () => void;
     onopenReddit?: () => void;
     onopenMedia?: () => void;
+    oncontrolenter?: () => void;
+    oncontrolleave?: () => void;
   } = $props();
 
-  let showInfo = $state(true);
   let activeZoneId = $state<string | null>(null);
   let overlayEl = $state<HTMLDivElement | null>(null);
-  let hideTimer: ReturnType<typeof setTimeout> | undefined;
-  const OVERLAY_HIDE_DELAY_MS = 3000;
-  const OVERLAY_HOVER_HIDE_DELAY_MS = 4000;
-
-  function resetHideTimer(delayMs: number) {
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => {
-      showInfo = false;
-    }, delayMs);
-  }
-
-  $effect(() => {
-    // Reset timer whenever post changes
-    void post.id;
-    showInfo = true;
-    activeZoneId = null;
-    resetHideTimer(OVERLAY_HIDE_DELAY_MS);
-    return () => clearTimeout(hideTimer);
-  });
-
-  function showOverlay() {
-    showInfo = true;
-    resetHideTimer(OVERLAY_HOVER_HIDE_DELAY_MS);
-  }
-
-  function hideOverlay() {
-    clearTimeout(hideTimer);
-    showInfo = false;
-    activeZoneId = null;
-  }
 
   const rating = $derived(post.localRating);
   const stepBackShortcut = formatViewerShortcutKeys('step_backward');
@@ -104,32 +79,14 @@
   const canMoveGalleryForward = $derived(totalMedia > 1 && mediaIndex < totalMedia - 1);
   const navZones = $derived<OverlayNavZone[]>([
     {
-      id: 'top-left',
-      className: 'top-left',
-      glyph: '↑',
-      action: canMoveGalleryBack ? 'gallery_back' : 'retreat',
-      label: canMoveGalleryBack ? 'Previous gallery item' : 'Previous post',
-      title: canMoveGalleryBack
-        ? `Previous gallery item (${stepBackShortcut})`
-        : `Previous post (${stepBackShortcut})`,
-    },
-    {
       id: 'top',
       className: 'top',
       glyph: '↑',
       action: canMoveGalleryBack ? 'gallery_back' : 'none',
       label: 'Previous gallery item',
-      title: canMoveGalleryBack ? `Previous gallery item (${stepBackShortcut})` : undefined,
-    },
-    {
-      id: 'top-right',
-      className: 'top-right',
-      glyph: '↑',
-      action: canMoveGalleryBack ? 'gallery_back' : 'retreat',
-      label: canMoveGalleryBack ? 'Previous gallery item' : 'Previous post',
       title: canMoveGalleryBack
         ? `Previous gallery item (${stepBackShortcut})`
-        : `Previous post (${stepBackShortcut})`,
+        : undefined,
     },
     {
       id: 'left',
@@ -148,32 +105,12 @@
       title: `Next post (${skipForwardShortcut})`,
     },
     {
-      id: 'bottom-left',
-      className: 'bottom-left',
-      glyph: '↓',
-      action: canMoveGalleryForward ? 'gallery_forward' : 'advance',
-      label: canMoveGalleryForward ? 'Next gallery item' : 'Next post',
-      title: canMoveGalleryForward
-        ? `Next gallery item (${stepForwardShortcut})`
-        : `Next post (${stepForwardShortcut})`,
-    },
-    {
       id: 'bottom',
       className: 'bottom',
       glyph: '↓',
       action: canMoveGalleryForward ? 'gallery_forward' : 'none',
       label: 'Next gallery item',
       title: canMoveGalleryForward ? `Next gallery item (${stepForwardShortcut})` : undefined,
-    },
-    {
-      id: 'bottom-right',
-      className: 'bottom-right',
-      glyph: '↓',
-      action: canMoveGalleryForward ? 'gallery_forward' : 'advance',
-      label: canMoveGalleryForward ? 'Next gallery item' : 'Next post',
-      title: canMoveGalleryForward
-        ? `Next gallery item (${stepForwardShortcut})`
-        : `Next post (${stepForwardShortcut})`,
     },
   ]);
 
@@ -222,68 +159,23 @@
     }
   }
 
-  function handleOverlayMouseMove(event: MouseEvent) {
-    const rect = overlayEl?.getBoundingClientRect();
-    if (!rect) return;
-
-    const pointerX = event.clientX - rect.left;
-    const pointerY = event.clientY - rect.top;
-    let closestZoneId: string | null = null;
-    let closestDistance = Number.POSITIVE_INFINITY;
-
-    for (const zone of navZones) {
-      if (zone.action === 'none') continue;
-      const point = getZoneAnchor(zone.id, rect.width, rect.height);
-      const distance = Math.hypot(pointerX - point.x, pointerY - point.y);
-
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closestZoneId = zone.id;
-      }
-    }
-
-    const activationRadius = Math.min(rect.width, rect.height) * 0.28;
-    const topRevealBand = Math.min(118, rect.height * 0.18);
-    const bottomRevealBand = Math.min(138, rect.height * 0.22);
-    const revealUi =
-      closestDistance <= activationRadius ||
-      pointerY <= topRevealBand ||
-      pointerY >= rect.height - bottomRevealBand;
-
-    if (!revealUi) {
-      hideOverlay();
-      return;
-    }
-
-    showOverlay();
-    activeZoneId = closestDistance <= activationRadius ? closestZoneId : null;
+  function handleOverlayPointerEnter() {
+    oncontrolenter?.();
   }
 
-  function handleOverlayMouseLeave() {
-    hideOverlay();
+  function handleOverlayPointerLeave() {
+    activeZoneId = null;
+    oncontrolleave?.();
   }
 
-  function getZoneAnchor(zoneId: string, width: number, height: number) {
-    switch (zoneId) {
-      case 'top-left':
-        return { x: 0, y: 0 };
-      case 'top':
-        return { x: width / 2, y: 0 };
-      case 'top-right':
-        return { x: width, y: 0 };
-      case 'left':
-        return { x: 0, y: height / 2 };
-      case 'right':
-        return { x: width, y: height / 2 };
-      case 'bottom-left':
-        return { x: 0, y: height };
-      case 'bottom':
-        return { x: width / 2, y: height };
-      case 'bottom-right':
-        return { x: width, y: height };
-      default:
-        return { x: width / 2, y: height / 2 };
-    }
+  function handleOverlayFocusIn() {
+    oncontrolenter?.();
+  }
+
+  function handleOverlayFocusOut(event: FocusEvent) {
+    if (event.relatedTarget instanceof Node && overlayEl?.contains(event.relatedTarget)) return;
+    activeZoneId = null;
+    oncontrolleave?.();
   }
 </script>
 
@@ -292,11 +184,13 @@
   class="overlay"
   role="region"
   aria-label="Post controls"
-  onmousemove={handleOverlayMouseMove}
-  onmouseleave={handleOverlayMouseLeave}
+  onpointerenter={handleOverlayPointerEnter}
+  onpointerleave={handleOverlayPointerLeave}
+  onfocusin={handleOverlayFocusIn}
+  onfocusout={handleOverlayFocusOut}
 >
   <!-- Top bar: counter + seen indicator -->
-  <div class="top-bar" class:visible={showInfo}>
+  <div class="top-bar" class:visible={chromeVisible}>
     <span class="counter">{postIndex + 1} / {totalPosts}</span>
     {#if totalMedia > 1}
       <span class="gallery-counter">img {mediaIndex + 1}/{totalMedia}</span>
@@ -374,7 +268,7 @@
   </div>
 
   <!-- Bottom info bar -->
-  <div class="bottom-bar" class:visible={showInfo}>
+  <div class="bottom-bar" class:visible={chromeVisible}>
     <div class="post-info">
       <p class="post-title">{post.title}</p>
       <p class="post-meta">
@@ -424,9 +318,18 @@
         aria-label={zone.label}
         title={zone.title}
         onclick={() => activateZone(zone.action)}
-        onfocus={() => {
-          showOverlay();
+        onpointerenter={() => {
           activeZoneId = zone.id;
+          oncontrolenter?.();
+        }}
+        onpointerleave={() => {
+          if (activeZoneId === zone.id) {
+            activeZoneId = null;
+          }
+        }}
+        onfocus={() => {
+          activeZoneId = zone.id;
+          oncontrolenter?.();
         }}
         onblur={() => {
           activeZoneId = null;
@@ -691,112 +594,87 @@
     grid-template-columns: minmax(108px, 24vw) 1fr minmax(108px, 24vw);
     grid-template-rows: minmax(84px, 18vh) 1fr minmax(84px, 18vh);
     grid-template-areas:
-      'top-left top top-right'
+      '. top .'
       'left . right'
-      'bottom-left bottom bottom-right';
+      '. bottom .';
     z-index: 1;
+    pointer-events: none;
   }
   .nav-zone {
-    display: flex;
-    border: none;
-    background: transparent;
-    pointer-events: all;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: clamp(52px, 4.5vw, 68px);
+    height: clamp(52px, 4.5vw, 68px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    background: rgba(8, 12, 18, 0.56);
+    backdrop-filter: blur(18px) saturate(0.95);
+    box-shadow:
+      0 18px 34px rgba(0, 0, 0, 0.28),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    pointer-events: auto;
     color: inherit;
-    padding: 16px;
     position: relative;
+    margin: 18px;
+    transition:
+      background 0.18s ease,
+      border-color 0.18s ease,
+      box-shadow 0.18s ease,
+      transform 0.18s ease;
   }
   .nav-zone:disabled {
     pointer-events: none;
+    opacity: 0.28;
   }
   .nav-zone::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    opacity: 0;
-    transition: opacity 0.18s ease;
+    content: none;
   }
-  .nav-zone.top-left { grid-area: top-left; justify-content: flex-start; align-items: flex-start; }
   .nav-zone.top {
     grid-area: top;
-    justify-content: center;
-    align-items: flex-start;
+    place-self: start center;
   }
-  .nav-zone.top-right { grid-area: top-right; justify-content: flex-end; align-items: flex-start; }
   .nav-zone.left {
     grid-area: left;
-    justify-content: flex-start;
-    align-items: center;
+    place-self: center start;
   }
   .nav-zone.right {
     grid-area: right;
-    justify-content: flex-end;
-    align-items: center;
-  }
-  .nav-zone.bottom-left {
-    grid-area: bottom-left;
-    justify-content: flex-start;
-    align-items: flex-end;
+    place-self: center end;
   }
   .nav-zone.bottom {
     grid-area: bottom;
-    justify-content: center;
-    align-items: flex-end;
+    place-self: end center;
   }
-  .nav-zone.bottom-right {
-    grid-area: bottom-right;
-    justify-content: flex-end;
-    align-items: flex-end;
-  }
-  .nav-zone.top-left::before {
-    background: radial-gradient(circle at top left, rgba(255, 255, 255, 0.045), transparent 60%);
-  }
-  .nav-zone.top::before {
-    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.035), transparent 70%);
-  }
-  .nav-zone.top-right::before {
-    background: radial-gradient(circle at top right, rgba(255, 255, 255, 0.045), transparent 60%);
-  }
-  .nav-zone.left::before {
-    background: linear-gradient(to right, rgba(255, 255, 255, 0.035), transparent 70%);
-  }
-  .nav-zone.right::before {
-    background: linear-gradient(to left, rgba(255, 255, 255, 0.035), transparent 70%);
-  }
-  .nav-zone.bottom-left::before {
-    background: radial-gradient(circle at bottom left, rgba(255, 255, 255, 0.045), transparent 60%);
-  }
-  .nav-zone.bottom::before {
-    background: linear-gradient(to top, rgba(255, 255, 255, 0.035), transparent 70%);
-  }
-  .nav-zone.bottom-right::before {
-    background: radial-gradient(circle at bottom right, rgba(255, 255, 255, 0.045), transparent 60%);
-  }
-  .nav-zone[data-active='true']::before,
-  .nav-zone:hover::before,
-  .nav-zone:focus-visible::before {
-    opacity: 0.56;
+  .nav-zone[data-active='true'],
+  .nav-zone:hover,
+  .nav-zone:focus-visible {
+    background: rgba(15, 24, 36, 0.82);
+    border-color: rgba(140, 199, 239, 0.34);
+    box-shadow:
+      0 22px 44px rgba(0, 0, 0, 0.34),
+      0 0 0 1px rgba(140, 199, 239, 0.12);
+    transform: scale(1.04);
   }
   .zone-glyph {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 28px;
-    min-height: 28px;
-    color: rgba(233, 233, 233, 0.2);
-    font-size: 1.2rem;
+    min-width: 32px;
+    min-height: 32px;
+    color: rgba(233, 233, 233, 0.78);
+    font-size: 1.45rem;
     line-height: 1;
-    transition: color 0.18s ease, transform 0.18s ease, text-shadow 0.18s ease;
-    text-shadow: 0 0 8px rgba(0, 0, 0, 0.18);
+    transition: color 0.18s ease, transform 0.18s ease;
   }
   .nav-zone[data-active='true'] .zone-glyph,
   .nav-zone:not(:disabled):hover .zone-glyph,
   .nav-zone:not(:disabled):focus-visible .zone-glyph {
-    color: rgba(233, 233, 233, 0.58);
-    transform: scale(1.03);
-    text-shadow: 0 0 14px rgba(255, 255, 255, 0.08);
+    color: rgba(246, 250, 255, 0.98);
+    transform: scale(1.06);
   }
   .nav-zone:disabled .zone-glyph {
-    color: rgba(233, 233, 233, 0.08);
+    color: rgba(233, 233, 233, 0.26);
   }
 
   @keyframes loading-pulse {
@@ -824,7 +702,7 @@
       grid-template-rows: minmax(64px, 15vh) 1fr minmax(64px, 15vh);
     }
     .nav-zone {
-      padding: 12px;
+      margin: 12px;
     }
     .hover-panel {
       right: auto;

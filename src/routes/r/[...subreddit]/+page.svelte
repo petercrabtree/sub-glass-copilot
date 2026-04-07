@@ -45,8 +45,8 @@
 
   const DISPLAY_MODE_STORAGE_KEY = 'subglass:display-mode';
   const AUTO_ADVANCE_SETTINGS_STORAGE_KEY = 'subglass:auto-advance-settings';
-  const POINTER_RESET_THROTTLE_MS = 280;
   const MIN_VIDEO_ADVANCE_MS = 5000;
+  const VIEWER_UI_DISENGAGE_DELAY_MS = 900;
   const DISPLAY_MODES: Array<{
     id: DisplayMode;
     label: string;
@@ -90,8 +90,9 @@
   let autoAdvanceInFlight = $state(false);
   let scrollSyncFrame = 0;
   let masonrySyncFrame = 0;
-  let lastPointerResetAt = 0;
   let lastRouteLoadKey = '';
+  let viewerUiEngaged = $state(false);
+  let viewerUiDisengageTimer: ReturnType<typeof setTimeout> | undefined;
 
   function formatErrorJson(feedError: RedditRequestError): string {
     return JSON.stringify(feedError, null, 2);
@@ -283,6 +284,27 @@
     countdownNowMs = now;
   }
 
+  function engageViewerUi() {
+    clearTimeout(viewerUiDisengageTimer);
+    viewerUiEngaged = true;
+  }
+
+  function releaseViewerUiSoon() {
+    clearTimeout(viewerUiDisengageTimer);
+    viewerUiDisengageTimer = setTimeout(() => {
+      viewerUiEngaged = false;
+    }, VIEWER_UI_DISENGAGE_DELAY_MS);
+  }
+
+  function handleViewerSurfaceFocusOut(event: FocusEvent) {
+    const currentTarget = event.currentTarget as HTMLElement | null;
+    if (currentTarget && event.relatedTarget instanceof Node && currentTarget.contains(event.relatedTarget)) {
+      return;
+    }
+
+    releaseViewerUiSoon();
+  }
+
   function syncCurrentSelectionState() {
     const media = posts[currentIndex]?.media;
 
@@ -419,7 +441,9 @@
     DISPLAY_MODES.find((mode) => mode.id === displayMode) ?? DISPLAY_MODES[0]
   );
   const autoAdvanceSuspended = $derived(
-    autoAdvancePaused || (currentMedia?.kind === 'video' && currentVideoTiming?.paused === true)
+    autoAdvancePaused ||
+    viewerUiEngaged ||
+    (currentMedia?.kind === 'video' && currentVideoTiming?.paused === true)
   );
   const loadedMediaStates = $derived(
     posts.map((post, index) => {
@@ -870,15 +894,6 @@
     });
   }
 
-  function handleViewerMouseMove() {
-    if (autoAdvanceSuspended || !currentMedia) return;
-
-    const now = Date.now();
-    if (now - lastPointerResetAt < POINTER_RESET_THROTTLE_MS) return;
-    lastPointerResetAt = now;
-    resetAutoAdvanceClock();
-  }
-
   function hasForwardTarget() {
     if (!currentMedia) return false;
     if (canUseGalleryNavigation() && galleryIndex < currentMedia.items.length - 1) return true;
@@ -928,7 +943,6 @@
   function toggleAutoAdvance() {
     autoAdvancePaused = !autoAdvancePaused;
     if (!autoAdvancePaused) {
-      lastPointerResetAt = Date.now();
       resetAutoAdvanceClock();
     }
   }
@@ -1025,6 +1039,7 @@
       window.removeEventListener('keydown', handleKeydown);
       cancelAnimationFrame(scrollSyncFrame);
       cancelAnimationFrame(masonrySyncFrame);
+      clearTimeout(viewerUiDisengageTimer);
     };
   });
 
@@ -1043,7 +1058,6 @@
   data-display-mode={displayMode}
   role="region"
   aria-label="Media viewer"
-  onmousemove={handleViewerMouseMove}
 >
   <div class="viewer-canvas">
     {#if loading}
@@ -1119,6 +1133,8 @@
               onrateDown={rateDown}
               onopenReddit={openReddit}
               onopenMedia={openMedia}
+              oncontrolenter={engageViewerUi}
+              oncontrolleave={releaseViewerUiSoon}
             />
           {/if}
         {:else if displayMode === 'scroll'}
@@ -1161,7 +1177,15 @@
           </div>
 
           {#if currentPost}
-            <div class="selection-card">
+            <div
+              class="selection-card"
+              role="group"
+              aria-label="Current post details"
+              onpointerenter={engageViewerUi}
+              onpointerleave={releaseViewerUiSoon}
+              onfocusin={engageViewerUi}
+              onfocusout={handleViewerSurfaceFocusOut}
+            >
               <p class="selection-kicker">{currentDisplayMode.blurb}</p>
               <p class="selection-title">{currentPost.title}</p>
               <p class="selection-meta">
@@ -1187,10 +1211,10 @@
             role="region"
             aria-label="Masonry wall"
             onscroll={handleMasonryFeedScroll}
-            onmouseenter={() => {
+            onpointerenter={() => {
               masonryAutoPaused = true;
             }}
-            onmouseleave={() => {
+            onpointerleave={() => {
               masonryAutoPaused = false;
             }}
             onfocusin={() => {
@@ -1237,7 +1261,15 @@
           </div>
 
           {#if currentPost}
-            <div class="selection-card selection-card--masonry">
+            <div
+              class="selection-card selection-card--masonry"
+              role="group"
+              aria-label="Current masonry selection details"
+              onpointerenter={engageViewerUi}
+              onpointerleave={releaseViewerUiSoon}
+              onfocusin={engageViewerUi}
+              onfocusout={handleViewerSurfaceFocusOut}
+            >
               <p class="selection-kicker">
                 {#if masonryAutoPaused}
                   auto-scroll paused
@@ -1334,6 +1366,8 @@
                 onrateDown={rateDown}
                 onopenReddit={openReddit}
                 onopenMedia={openMedia}
+                oncontrolenter={engageViewerUi}
+                oncontrolleave={releaseViewerUiSoon}
               />
             {/if}
           </div>
@@ -1346,7 +1380,13 @@
     {/if}
   </div>
 
-  <nav class="topbar">
+  <nav
+    class="topbar"
+    onpointerenter={engageViewerUi}
+    onpointerleave={releaseViewerUiSoon}
+    onfocusin={engageViewerUi}
+    onfocusout={handleViewerSurfaceFocusOut}
+  >
     <a href="/r/all" class="logo">SubGlass</a>
 
     <form onsubmit={(event) => { event.preventDefault(); navigate(); }} class="path-form">
@@ -1386,8 +1426,14 @@
   {#if currentMedia && !loading && !error}
     <div
       class="auto-advance-hud"
+      role="group"
+      aria-label="Auto advance status"
       data-paused={autoAdvanceSuspended}
       style={`--auto-advance-progress:${autoAdvanceProgress};`}
+      onpointerenter={engageViewerUi}
+      onpointerleave={releaseViewerUiSoon}
+      onfocusin={engageViewerUi}
+      onfocusout={handleViewerSurfaceFocusOut}
     >
       <div class="auto-advance-progress" aria-hidden="true"></div>
       <button
@@ -1409,7 +1455,16 @@
       </button>
     </div>
 
-    <div class="auto-advance-dock" data-paused={autoAdvanceSuspended}>
+    <div
+      class="auto-advance-dock"
+      role="group"
+      aria-label="Auto advance controls"
+      data-paused={autoAdvanceSuspended}
+      onpointerenter={engageViewerUi}
+      onpointerleave={releaseViewerUiSoon}
+      onfocusin={engageViewerUi}
+      onfocusout={handleViewerSurfaceFocusOut}
+    >
       <span class="auto-advance-title">{autoAdvanceSummary}</span>
       <details class="auto-settings">
         <summary>{imageAdvanceSeconds}s / {videoAdvancePlays}x</summary>
@@ -1443,7 +1498,15 @@
   {/if}
 
   {#if dev}
-    <details bind:open={debugExpanded} class="debug-dock" class:has-error={!!error}>
+    <details
+      bind:open={debugExpanded}
+      class="debug-dock"
+      class:has-error={!!error}
+      onpointerenter={engageViewerUi}
+      onpointerleave={releaseViewerUiSoon}
+      onfocusin={engageViewerUi}
+      onfocusout={handleViewerSurfaceFocusOut}
+    >
       <summary>
         <div class="debug-summary-copy">
           <span class="debug-kicker">dbg</span>
@@ -1761,6 +1824,18 @@
       filter 220ms ease;
   }
 
+  .topbar .path-form,
+  .topbar .nav-links,
+  .topbar .display-switcher {
+    width: auto !important;
+    max-width: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+    pointer-events: auto !important;
+    overflow: visible !important;
+  }
+
   .display-chip {
     padding: 6px 10px;
     border-radius: 999px;
@@ -1768,6 +1843,19 @@
     text-transform: lowercase;
     letter-spacing: 0.04em;
     opacity: 0.74;
+  }
+
+  .topbar .path-form {
+    flex: 1 1 260px !important;
+    min-width: min(260px, 42vw) !important;
+  }
+
+  .topbar .nav-links {
+    flex: 0 1 auto !important;
+  }
+
+  .topbar .display-switcher {
+    flex: 0 1 auto !important;
   }
 
   .display-chip.active {
@@ -2640,77 +2728,6 @@
   }
 
   @media (hover: hover) and (pointer: fine) {
-    .topbar:not(:hover):not(:focus-within) {
-      background: transparent;
-      border-color: transparent;
-      box-shadow: none;
-      backdrop-filter: none;
-      transform: translateY(-2px);
-    }
-
-    .topbar:not(:hover):not(:focus-within) .logo {
-      color: rgba(198, 226, 246, 0.56);
-      background: rgba(9, 12, 16, 0.12);
-      border-color: rgba(255, 255, 255, 0.03);
-    }
-
-  .topbar:not(:hover):not(:focus-within) .path-form,
-    .topbar:not(:hover):not(:focus-within) .nav-links,
-    .topbar:not(:hover):not(:focus-within) .display-switcher {
-      max-width: 0;
-      opacity: 0;
-      transform: translateY(-6px);
-      filter: blur(3px);
-      pointer-events: none;
-    }
-
-    .selection-card:not(:hover):not(:focus-within) {
-      background: transparent;
-      border-color: transparent;
-      box-shadow: none;
-      backdrop-filter: none;
-      transform: translateY(4px);
-    }
-
-    .selection-card:not(:hover):not(:focus-within) .selection-title,
-    .selection-card:not(:hover):not(:focus-within) .selection-meta,
-    .selection-card:not(:hover):not(:focus-within) .selection-actions {
-      max-height: 0;
-      opacity: 0;
-      transform: translateY(10px);
-      filter: blur(3px);
-      pointer-events: none;
-    }
-
-    .selection-card:not(:hover):not(:focus-within) .selection-kicker {
-      color: rgba(152, 207, 241, 0.62);
-      background: rgba(9, 12, 16, 0.12);
-      border-color: rgba(255, 255, 255, 0.03);
-    }
-
-    .auto-advance-dock:not(:hover):not(:focus-within) {
-      background: transparent;
-      border-color: transparent;
-      box-shadow: none;
-      backdrop-filter: none;
-      transform: translateY(4px);
-    }
-
-    .auto-advance-dock:not(:hover):not(:focus-within) .auto-advance-title {
-      max-height: 0;
-      opacity: 0;
-      transform: translateY(8px);
-      filter: blur(3px);
-      pointer-events: none;
-    }
-
-    .auto-advance-dock:not(:hover):not(:focus-within) .auto-settings summary {
-      opacity: 0.34;
-      background: rgba(255, 255, 255, 0.025);
-      border-color: rgba(255, 255, 255, 0.03);
-      color: rgba(215, 227, 239, 0.54);
-    }
-
     .debug-dock:not([open]):not(.has-error):not(:hover):not(:focus-within) {
       background: transparent;
       border-color: transparent;
