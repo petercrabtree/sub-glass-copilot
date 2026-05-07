@@ -1,15 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { SubredditRecord } from '$lib/types';
-  import { scanNextSubredditProfiles, scanSubredditProfile } from '$lib/discovery/subreddits';
+  import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import { getAllSubreddits, getAdjacencyFrom } from '$lib/db/store';
+  import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
 
   let subreddits = $state<SubredditRecord[]>([]);
   let loading = $state(true);
-  let scanning = $state(false);
   let scanMessage = $state('');
   let suggestions = $state<Array<{ name: string; reason: string; score: number; evidence?: string }>>([]);
   let sortedSubreddits = $derived([...subreddits].sort((a, b) => b.localRating - a.localRating));
+  let scanning = $derived(profileScanManager.active);
 
   onMount(async () => {
     subreddits = await getAllSubreddits();
@@ -68,33 +69,21 @@
   }
 
   async function scanNext() {
-    scanning = true;
     scanMessage = '';
     try {
-      const results = await scanNextSubredditProfiles(20);
-      const ok = results.filter((result) => result.ok).length;
-      const links = results.reduce((sum, result) => sum + result.linksDiscovered, 0);
-      scanMessage = `Scanned ${results.length}; ${ok} ok; ${links} links found.`;
+      await profileScanManager.scanNext(20);
+      scanMessage = profileScanManager.lastMessage || profileScanManager.detailText;
       await refresh();
     } catch (error) {
       scanMessage = error instanceof Error ? error.message : String(error);
-    } finally {
-      scanning = false;
     }
   }
 
   async function scanOne(name: string) {
-    scanning = true;
     scanMessage = '';
-    try {
-      const result = await scanSubredditProfile(name);
-      scanMessage = result.ok
-        ? `Scanned r/${result.name}; ${result.linksDiscovered} links found.`
-        : `Failed r/${result.name}: ${result.error}`;
-      await refresh();
-    } finally {
-      scanning = false;
-    }
+    await profileScanManager.scanOne(name);
+    scanMessage = profileScanManager.lastMessage || profileScanManager.detailText;
+    await refresh();
   }
 </script>
 
@@ -117,6 +106,7 @@
       <button class="refresh-btn" onclick={refresh}>Refresh</button>
       <button class="refresh-btn" onclick={scanNext} disabled={scanning}>{scanning ? 'Scanning…' : 'Scan next 20'}</button>
       <a href="/roulette" class="refresh-link">Roulette mode</a>
+      <ProfileScanStatus />
     </div>
     {#if scanMessage}<p class="scan-message">{scanMessage}</p>{/if}
 

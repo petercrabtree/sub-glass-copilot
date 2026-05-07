@@ -2,6 +2,7 @@
   import { dev } from '$app/environment';
   import { onMount } from 'svelte';
   import { startDevErrorReporter } from '$lib/dev/error-reporter';
+  import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import { registerServiceWorker } from '$lib/service-worker/register';
   import '../app.css';
 
@@ -9,10 +10,14 @@
 
   onMount(() => {
     const stopDevErrorReporter = dev ? startDevErrorReporter() : undefined;
+    const stopProfileScanManager = profileScanManager.initialize();
 
     registerServiceWorker();
 
-    return () => stopDevErrorReporter?.();
+    return () => {
+      stopProfileScanManager();
+      stopDevErrorReporter?.();
+    };
   });
 </script>
 

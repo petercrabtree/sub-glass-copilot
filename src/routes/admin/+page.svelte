@@ -3,8 +3,9 @@
   import {
     getAllSubreddits, getAllPosts, getAllMedia, getAllEvents, getAllAdjacency,
     exportAllData, importAllData, getAllFeedSnapshots,
+    setSubredditMuted, setSubredditRating, clearSubredditProfileFailure,
   } from '$lib/db/store';
-  import { scanNextSubredditProfiles } from '$lib/discovery/subreddits';
+  import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import {
     clearMediaCache,
     getMediaCacheDiagnostics,
@@ -14,6 +15,7 @@
     type MediaCacheDiagnostics,
   } from '$lib/service-worker/media-cache';
   import { registerServiceWorker } from '$lib/service-worker/register';
+  import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
   import type { SubredditRecord, PostRecord, SignalEvent, AdjacencyLink, FeedSnapshot } from '$lib/types';
 
   let stats = $state({ subreddits: 0, posts: 0, media: 0, events: 0, adjacency: 0, snapshots: 0 });
@@ -23,7 +25,7 @@
   let adjacency = $state<AdjacencyLink[]>([]);
   let snapshots = $state<FeedSnapshot[]>([]);
   let mediaCache = $state<MediaCacheDiagnostics | null>(null);
-  let activeTab = $state<'overview' | 'cache' | 'subreddits' | 'posts' | 'events' | 'adjacency'>('overview');
+  let activeTab = $state<'overview' | 'cache' | 'discovery' | 'subreddits' | 'posts' | 'events' | 'adjacency'>('overview');
   let importText = $state('');
   let importError = $state('');
   let importSuccess = $state(false);
@@ -31,9 +33,23 @@
   let cacheError = $state('');
   let cacheBusyAction = $state<string | null>(null);
   let scanMessage = $state('');
-  let scanBusy = $state(false);
   let loading = $state(true);
   let sortedSubreddits = $derived([...subreddits].sort((a, b) => b.localRating - a.localRating));
+  let editableSubreddits = $derived(
+    [...subreddits].sort((a, b) => {
+      const aUnscanned = a.profileFetchedAt ? 1 : 0;
+      const bUnscanned = b.profileFetchedAt ? 1 : 0;
+      if (aUnscanned !== bUnscanned) return aUnscanned - bUnscanned;
+      return b.localRating - a.localRating;
+    })
+  );
+  let scanBusy = $derived(profileScanManager.active);
+  let discoveryStats = $derived({
+    verified: subreddits.filter((sub) => sub.profileFetchedAt && !sub.isMuted).length,
+    unscanned: subreddits.filter((sub) => !sub.profileFetchedAt && !sub.isMuted && sub.name !== 'all').length,
+    failed: subreddits.filter((sub) => sub.discoveryStatus === 'failed' || sub.profileFetchError).length,
+    muted: subreddits.filter((sub) => sub.isMuted || sub.discoveryStatus === 'muted').length,
+  });
 
   onMount(() => {
     void Promise.all([loadData(), loadMediaCache()]).then(() => {
@@ -155,20 +171,54 @@
     });
   }
 
-  async function scanNextProfiles() {
-    scanBusy = true;
+  async function runDiscoveryAction(task: () => Promise<void>) {
     scanMessage = '';
     try {
-      const results = await scanNextSubredditProfiles(20);
-      const ok = results.filter((result) => result.ok).length;
-      const links = results.reduce((sum, result) => sum + result.linksDiscovered, 0);
-      scanMessage = `Scanned ${results.length}; ${ok} ok; ${links} links found.`;
+      await task();
+      scanMessage = profileScanManager.lastMessage || profileScanManager.detailText;
       await loadData();
     } catch (error) {
       scanMessage = error instanceof Error ? error.message : String(error);
-    } finally {
-      scanBusy = false;
     }
+  }
+
+  async function scanNextProfiles() {
+    await runDiscoveryAction(() => profileScanManager.scanNext(20));
+  }
+
+  async function scanAllDueProfiles() {
+    await runDiscoveryAction(() => profileScanManager.scanAllDue());
+  }
+
+  async function scanFailedProfiles() {
+    await runDiscoveryAction(() => profileScanManager.scanFailed());
+  }
+
+  async function rescanAllProfiles() {
+    if (!window.confirm('Rescan every unmuted subreddit profile? This can issue many Reddit requests.')) return;
+    await runDiscoveryAction(() => profileScanManager.rescanAll());
+  }
+
+  async function scanOneProfile(name: string) {
+    await runDiscoveryAction(() => profileScanManager.scanOne(name));
+  }
+
+  async function updateSubredditRatingFromInput(sub: SubredditRecord, event: Event) {
+    const value = Number((event.currentTarget as HTMLInputElement).value);
+    if (!Number.isFinite(value)) return;
+
+    await setSubredditRating(sub.name, Math.round(value));
+    await loadData();
+  }
+
+  async function toggleSubredditMuted(sub: SubredditRecord, event: Event) {
+    await setSubredditMuted(sub.name, (event.currentTarget as HTMLInputElement).checked);
+    await loadData();
+  }
+
+  async function clearSubredditFailure(sub: SubredditRecord) {
+    await clearSubredditProfileFailure(sub.name);
+    await loadData();
   }
 
   function handleFileImport(e: Event) {
@@ -242,7 +292,7 @@
       </div>
 
       <div class="tabs">
-        {#each (['overview', 'cache', 'subreddits', 'posts', 'events', 'adjacency'] as const) as tab}
+        {#each (['overview', 'cache', 'discovery', 'subreddits', 'posts', 'events', 'adjacency'] as const) as tab}
           <button
             class="tab"
             class:active={activeTab === tab}
@@ -294,7 +344,11 @@
             <section>
               <h2>Discovery Scan</h2>
               <p>Fetch due subreddit profiles, extract linked subreddits, and update adjacency weights.</p>
-              <button class="action-btn" onclick={scanNextProfiles} disabled={scanBusy}>{scanBusy ? 'Scanning…' : 'Scan next 20'}</button>
+              <div class="cache-actions">
+                <ProfileScanStatus />
+                <button class="action-btn" onclick={scanNextProfiles} disabled={scanBusy}>{scanBusy ? 'Scanning…' : 'Scan next 20'}</button>
+                <button class="action-btn" onclick={() => { activeTab = 'discovery'; }}>Controls</button>
+              </div>
               {#if scanMessage}<p class="success">{scanMessage}</p>{/if}
             </section>
           </div>
@@ -366,6 +420,107 @@
               {:else}
                 <p class="cache-meta">No cached image requests yet.</p>
               {/if}
+            </div>
+          </section>
+
+        {:else if activeTab === 'discovery'}
+          <section class="discovery-panel">
+            <div class="cache-panel-header">
+              <div>
+                <h2>Subreddit Discovery</h2>
+                <p>Background profile scans enrich subreddit metadata and adjacency links without leaving the client.</p>
+              </div>
+              <ProfileScanStatus />
+            </div>
+
+            <div class="stats-grid cache-stats-grid">
+              <div class="stat-card">
+                <div class="stat-value">{discoveryStats.verified}</div>
+                <div class="stat-label">Verified</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{discoveryStats.unscanned}</div>
+                <div class="stat-label">Unscanned</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{profileScanManager.queuedCount}</div>
+                <div class="stat-label">Queued</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{discoveryStats.failed}</div>
+                <div class="stat-label">Failed</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{discoveryStats.muted}</div>
+                <div class="stat-label">Muted</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{profileScanManager.progressPercent ?? '—'}</div>
+                <div class="stat-label">Progress %</div>
+              </div>
+            </div>
+
+            <div class="discovery-controls">
+              <label class="toggle-row" title={profileScanManager.detailText}>
+                <input
+                  type="checkbox"
+                  checked={profileScanManager.autoEnabled}
+                  onchange={(event) => profileScanManager.setAutoEnabled((event.currentTarget as HTMLInputElement).checked)}
+                />
+                <span>Auto scan newly discovered subreddits</span>
+              </label>
+              <div class="cache-actions">
+                <button class="action-btn" onclick={scanNextProfiles} disabled={scanBusy}>{scanBusy ? 'Scanning…' : 'Scan next 20'}</button>
+                <button class="action-btn" onclick={scanAllDueProfiles} disabled={scanBusy}>Full due scan</button>
+                <button class="action-btn" onclick={scanFailedProfiles} disabled={scanBusy}>Rescan failed</button>
+                <button class="action-btn action-btn--danger" onclick={rescanAllProfiles} disabled={scanBusy}>Force rescan all</button>
+                {#if profileScanManager.paused}
+                  <button class="action-btn" onclick={() => profileScanManager.resume()}>Resume</button>
+                {:else}
+                  <button class="action-btn" onclick={() => profileScanManager.pause()} disabled={!scanBusy && profileScanManager.queuedCount === 0}>Pause</button>
+                {/if}
+              </div>
+              {#if profileScanManager.fixedTotalProgress}
+                <div class="scan-progress" title={profileScanManager.detailText}>
+                  <span style={`width:${profileScanManager.progressPercent ?? 0}%`}></span>
+                </div>
+              {/if}
+              <p class="scan-detail" title={profileScanManager.detailText}>{profileScanManager.detailText}</p>
+              {#if scanMessage}<p class="success">{scanMessage}</p>{/if}
+            </div>
+
+            <div class="data-table discovery-table">
+              {#each editableSubreddits as sub}
+                <div class="data-row discovery-row" class:muted-row={sub.isMuted}>
+                  <a href="/r/{sub.name}" class="sub-link">r/{sub.name}</a>
+                  <input
+                    class="rating-input"
+                    type="number"
+                    value={sub.localRating}
+                    title="Local rating"
+                    onchange={(event) => updateSubredditRatingFromInput(sub, event)}
+                  />
+                  <span class="field">{sub.discoveryStatus ?? 'discovered'}</span>
+                  {#if sub.profileFetchedAt}
+                    <span class="field meta">profile: {new Date(sub.profileFetchedAt).toLocaleString()}</span>
+                  {:else}
+                    <span class="field meta">profile: unscanned</span>
+                  {/if}
+                  {#if sub.profileFetchError}<span class="field error">{sub.profileFetchError}</span>{/if}
+                  <label class="row-toggle">
+                    <input
+                      type="checkbox"
+                      checked={sub.isMuted}
+                      onchange={(event) => toggleSubredditMuted(sub, event)}
+                    />
+                    <span>muted</span>
+                  </label>
+                  <button class="row-action" onclick={() => scanOneProfile(sub.name)} disabled={scanBusy}>scan</button>
+                  {#if sub.profileFetchError}
+                    <button class="row-action" onclick={() => clearSubredditFailure(sub)}>clear fail</button>
+                  {/if}
+                </div>
+              {/each}
             </div>
           </section>
 
@@ -479,6 +634,7 @@
   .tab-content { min-height: 300px; }
   .export-import { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; }
   .cache-panel { display: flex; flex-direction: column; gap: 20px; }
+  .discovery-panel { display: flex; flex-direction: column; gap: 18px; }
   .cache-panel-header {
     display: flex;
     justify-content: space-between;
@@ -526,6 +682,40 @@
   }
   .action-btn--danger { background: #6a3030; }
   .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .discovery-controls {
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+    background: #101010;
+    border: 1px solid #222;
+    border-radius: 8px;
+  }
+  .toggle-row,
+  .row-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #aaa;
+    font-size: 0.84rem;
+  }
+  .scan-progress {
+    height: 7px;
+    overflow: hidden;
+    background: #181818;
+    border: 1px solid #262626;
+    border-radius: 999px;
+  }
+  .scan-progress span {
+    display: block;
+    height: 100%;
+    background: #6ade8a;
+    transition: width 180ms ease;
+  }
+  .scan-detail {
+    color: #888;
+    font-size: 0.78rem;
+    line-height: 1.4;
+  }
   .file-input { color: #888; font-size: 0.85rem; margin-bottom: 8px; display: block; }
   .import-textarea {
     width: 100%; background: #141414; border: 1px solid #333; color: #e0e0e0;
@@ -539,6 +729,26 @@
     display: flex; align-items: center; gap: 12px; padding: 6px 8px;
     background: #111; border-radius: 4px; flex-wrap: wrap; font-size: 0.85rem;
   }
+  .discovery-row { gap: 10px; }
+  .discovery-row.muted-row { opacity: 0.58; }
+  .rating-input {
+    width: 64px;
+    background: #151515;
+    color: #e0e0e0;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 5px 6px;
+    font-size: 0.78rem;
+  }
+  .row-action {
+    background: #1d2f42;
+    color: #d8e5ef;
+    border: 1px solid #2b4054;
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-size: 0.72rem;
+  }
+  .row-action:disabled { opacity: 0.5; cursor: not-allowed; }
   .sub-link { color: #6ab0de; }
   .field { color: #888; }
   .meta { color: #555; font-size: 0.75rem; }

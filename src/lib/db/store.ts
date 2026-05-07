@@ -148,6 +148,14 @@ export async function updateSubredditRating(name: string, delta: number): Promis
   }
 }
 
+export async function setSubredditRating(name: string, rating: number): Promise<void> {
+  const db = await getDB();
+  const sub = await db.get('subreddits', name.toLowerCase());
+  if (sub) {
+    await db.put('subreddits', { ...sub, localRating: rating });
+  }
+}
+
 export async function setSubredditMuted(name: string, muted: boolean): Promise<void> {
   const db = await getDB();
   const sub = await db.get('subreddits', name.toLowerCase());
@@ -156,6 +164,19 @@ export async function setSubredditMuted(name: string, muted: boolean): Promise<v
       ...sub,
       isMuted: muted,
       discoveryStatus: muted ? 'muted' : sub.profileFetchedAt ? 'verified' : 'discovered',
+    });
+  }
+}
+
+export async function clearSubredditProfileFailure(name: string): Promise<void> {
+  const db = await getDB();
+  const sub = await db.get('subreddits', name.toLowerCase());
+  if (sub) {
+    await db.put('subreddits', {
+      ...sub,
+      discoveryStatus: sub.isMuted ? 'muted' : sub.profileFetchedAt ? 'verified' : 'discovered',
+      profileFetchFailedAt: undefined,
+      profileFetchError: undefined,
     });
   }
 }

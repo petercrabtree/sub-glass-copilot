@@ -6,7 +6,7 @@ import {
   upsertAdjacency,
   upsertSubreddit,
 } from '$lib/db/store';
-import { fetchSubredditAbout } from '$lib/transport/reddit';
+import { fetchSubredditAboutResult } from '$lib/transport/reddit';
 import type { AdjacencyLink, SubredditRecord } from '$lib/types';
 
 export interface SubredditProfileScanResult {
@@ -14,6 +14,8 @@ export interface SubredditProfileScanResult {
   ok: boolean;
   linksDiscovered: number;
   error?: string;
+  tooFast?: boolean;
+  rateLimitedUntil?: number;
 }
 
 function normalizeSubredditName(name: string): string {
@@ -120,11 +122,28 @@ export async function scanSubredditProfile(name: string): Promise<SubredditProfi
   }
 
   const existing = await getSubreddit(normalizedName);
-  const response = await fetchSubredditAbout(normalizedName);
-  const data = asRecord(response?.data);
+  const response = await fetchSubredditAboutResult(normalizedName);
 
+  if (!response.ok) {
+    if (response.error.tooFast) {
+      return {
+        name: normalizedName,
+        ok: false,
+        linksDiscovered: 0,
+        error: response.error.message,
+        tooFast: true,
+        rateLimitedUntil: response.error.rateLimitedUntil,
+      };
+    }
+
+    const error = response.error.message || 'subreddit profile fetch failed';
+    await markSubredditProfileFailed(normalizedName, error);
+    return { name: normalizedName, ok: false, linksDiscovered: 0, error };
+  }
+
+  const data = asRecord(response.data.data);
   if (!data) {
-    const error = 'subreddit profile fetch failed';
+    const error = 'subreddit profile response did not include profile data';
     await markSubredditProfileFailed(normalizedName, error);
     return { name: normalizedName, ok: false, linksDiscovered: 0, error };
   }

@@ -8,7 +8,7 @@
   import type { RedditDebugState, RedditRequestError } from '$lib/transport/reddit';
   import { normalizeListingResponse } from '$lib/normalize/posts';
   import { enrichRedgifsPosts } from '$lib/media/redgifs';
-  import { scanSubredditProfiles } from '$lib/discovery/subreddits';
+  import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import {
     DEFAULT_ROULETTE_SETTINGS,
     chooseRouletteSubreddits,
@@ -26,6 +26,7 @@
   import { extractLinksFromPost } from '$lib/adjacency/extract';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
   import PostOverlay from '$lib/components/PostOverlay.svelte';
+  import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
   import {
     getViewerActionForKey,
     getViewerShortcut,
@@ -1119,7 +1120,7 @@
 
     const scanTargets = getProfileScanTargets(sub, mediaPosts);
     if (scanTargets.length > 0) {
-      void scanSubredditProfiles(scanTargets).catch((scanError) => {
+      void profileScanManager.enqueueBackgroundTargets(scanTargets).catch((scanError) => {
         console.warn('Failed to scan subreddit profiles', scanError);
       });
     }
@@ -1940,6 +1941,7 @@
 	      {#if isRouletteMode}
 	        <span class="roulette-chip">roulette {rouletteRoundProgress}/{rouletteSettings.imagesPerRound}</span>
 	      {/if}
+	      <ProfileScanStatus class="viewer-profile-scan-status" />
 
 	      <details class="topbar-menu">
 	        <summary aria-label="Viewer menu">menu</summary>
@@ -2223,6 +2225,7 @@
       type="button"
       class="ui-reveal-button"
       aria-label="Show viewer UI"
+      title={`Show viewer UI · ${profileScanManager.detailText}`}
       onclick={() => setViewerUiMode('mini')}
     >
       ui

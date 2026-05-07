@@ -11,17 +11,17 @@
     persistRouletteSettings,
     readStoredRouletteSettings,
   } from '$lib/discovery/roulette';
-  import { scanNextSubredditProfiles, type SubredditProfileScanResult } from '$lib/discovery/subreddits';
+  import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import { getAllSubreddits } from '$lib/db/store';
+  import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
   import type { SubredditRecord, SubredditRouletteSettings } from '$lib/types';
 
   let subreddits = $state<SubredditRecord[]>([]);
   let settings = $state<SubredditRouletteSettings>(DEFAULT_ROULETTE_SETTINGS);
   let selected = $state<SubredditRecord[]>([]);
   let loading = $state(true);
-  let scanning = $state(false);
-  let scanResults = $state<SubredditProfileScanResult[]>([]);
   let message = $state('');
+  let scanning = $derived(profileScanManager.active);
 
   const candidates = $derived(getRouletteCandidates(subreddits, settings));
   const sortedCandidates = $derived(
@@ -72,18 +72,13 @@
   }
 
   async function scanNext() {
-    scanning = true;
     message = '';
     try {
-      scanResults = await scanNextSubredditProfiles(20);
+      await profileScanManager.scanNext(20);
       await loadData();
-      const okCount = scanResults.filter((result) => result.ok).length;
-      const linkCount = scanResults.reduce((sum, result) => sum + result.linksDiscovered, 0);
-      message = `Scanned ${scanResults.length}; ${okCount} ok; ${linkCount} links found.`;
+      message = profileScanManager.lastMessage || profileScanManager.detailText;
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
-    } finally {
-      scanning = false;
     }
   }
 
@@ -110,6 +105,7 @@
         <p>Weighted random subreddit bundles from the local catalog.</p>
       </div>
       <div class="header-actions">
+        <ProfileScanStatus />
         <button type="button" onclick={scanNext} disabled={scanning}>{scanning ? 'Scanning...' : 'Scan next 20'}</button>
         <button type="button" onclick={reroll} disabled={loading || candidates.length === 0}>Reroll</button>
         <button type="button" class="primary" onclick={start} disabled={loading || selected.length === 0}>Start</button>

@@ -24,10 +24,17 @@ export interface RedditRequestError {
   contentType?: string;
   cause?: string;
   responseSnippet?: string;
+  tooFast?: boolean;
+  retryAfterMs?: number;
+  rateLimitedUntil?: number;
 }
 
 export type RedditListingResult =
   | { ok: true; data: RedditListingResponse }
+  | { ok: false; error: RedditRequestError };
+
+export type RedditAboutResult =
+  | { ok: true; data: RedditAboutResponse }
   | { ok: false; error: RedditRequestError };
 
 export interface RedditDebugEntry {
@@ -35,6 +42,7 @@ export interface RedditDebugEntry {
   url: string;
   fetchedAt: number;
   durationMs: number;
+  waitedMs?: number;
   ok: boolean;
   status?: number;
   statusText?: string;
@@ -48,8 +56,24 @@ export interface RedditDebugState {
   recent: RedditDebugEntry[];
 }
 
+export interface RedditRateLimitState {
+  active: boolean;
+  until: number;
+  retryAfterMs: number;
+  status?: number;
+  url?: string;
+}
+
 const BASE = 'https://old.reddit.com';
 const DEBUG_STORAGE_KEY = 'subglass:reddit-debug';
+const TOO_FAST_HTTP_STATUSES = new Set([420, 429]);
+const DEFAULT_TOO_FAST_RETRY_MS = 60 * 1000;
+let redditRateLimitedUntil = 0;
+let lastRateLimitState: RedditRateLimitState = {
+  active: false,
+  until: 0,
+  retryAfterMs: 0,
+};
 
 function getBaseUrl(): string {
   const configuredBase = import.meta.env.VITE_SUBGLASS_REDDIT_BASE_URL as string | undefined;
@@ -72,6 +96,76 @@ function formatErrorCause(error: unknown): string | undefined {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
   if (typeof error === 'string') return error;
   return undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(headers: Headers): number | undefined {
+  const raw = headers.get('retry-after');
+  if (!raw) return undefined;
+
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
+
+  return undefined;
+}
+
+function rememberTooFastResponse(res: Response, url: string): RedditRateLimitState | undefined {
+  const retryAfterMsFromHeader = parseRetryAfterMs(res.headers);
+  if (!TOO_FAST_HTTP_STATUSES.has(res.status) && retryAfterMsFromHeader === undefined) return undefined;
+
+  const retryAfterMs = retryAfterMsFromHeader ?? DEFAULT_TOO_FAST_RETRY_MS;
+  const until = Date.now() + retryAfterMs;
+  redditRateLimitedUntil = Math.max(redditRateLimitedUntil, until);
+  lastRateLimitState = {
+    active: true,
+    until: redditRateLimitedUntil,
+    retryAfterMs,
+    status: res.status,
+    url,
+  };
+
+  return lastRateLimitState;
+}
+
+async function waitForRedditCooldown(): Promise<number> {
+  const waitMs = Math.max(0, redditRateLimitedUntil - Date.now());
+  if (waitMs <= 0) {
+    if (lastRateLimitState.active) {
+      lastRateLimitState = {
+        ...lastRateLimitState,
+        active: false,
+        retryAfterMs: 0,
+      };
+    }
+    return 0;
+  }
+
+  await sleep(waitMs);
+  return waitMs;
+}
+
+export function readRedditRateLimitState(): RedditRateLimitState {
+  const remainingMs = Math.max(0, redditRateLimitedUntil - Date.now());
+  if (remainingMs <= 0) {
+    return {
+      ...lastRateLimitState,
+      active: false,
+      retryAfterMs: 0,
+    };
+  }
+
+  return {
+    ...lastRateLimitState,
+    active: true,
+    until: redditRateLimitedUntil,
+    retryAfterMs: remainingMs,
+  };
 }
 
 function recordDebugEntry(entry: RedditDebugEntry): void {
@@ -123,7 +217,11 @@ export function readRedditDebugState(): RedditDebugState | null {
   }
 }
 
-async function parseJsonResponse<T>(res: Response, url: string): Promise<
+async function parseJsonResponse<T>(
+  res: Response,
+  url: string,
+  rateLimitState?: RedditRateLimitState
+): Promise<
   | { ok: true; data: T }
   | { ok: false; error: RedditRequestError }
 > {
@@ -136,12 +234,17 @@ async function parseJsonResponse<T>(res: Response, url: string): Promise<
       ok: false,
       error: {
         kind: 'http',
-        message: `Reddit HTTP ${res.status} ${res.statusText}`,
+        message: rateLimitState?.active
+          ? `Reddit HTTP ${res.status} ${res.statusText}; waiting before more requests`
+          : `Reddit HTTP ${res.status} ${res.statusText}`,
         url,
         status: res.status,
         statusText: res.statusText,
         contentType,
         responseSnippet,
+        tooFast: Boolean(rateLimitState?.active),
+        retryAfterMs: rateLimitState?.retryAfterMs,
+        rateLimitedUntil: rateLimitState?.until,
       },
     };
   }
@@ -175,19 +278,22 @@ function buildListingUrl(spec: FetchSpec, limit = 25): string {
 export async function fetchListing(spec: FetchSpec, limit = 25): Promise<RedditListingResult> {
   const url = buildListingUrl(spec, limit);
   const startedAt = Date.now();
+  const waitedMs = await waitForRedditCooldown();
   try {
     const res = await fetch(url, {
       headers: {
         accept: 'application/json'
       }
     });
-    const parsed = await parseJsonResponse<RedditListingResponse>(res, url);
+    const rateLimitState = rememberTooFastResponse(res, url);
+    const parsed = await parseJsonResponse<RedditListingResponse>(res, url, rateLimitState);
     const fetchedAt = Date.now();
     recordDebugEntry({
       scope: 'listing',
       url,
       fetchedAt,
       durationMs: fetchedAt - startedAt,
+      waitedMs,
       ok: parsed.ok,
       status: res.status,
       statusText: res.statusText,
@@ -211,6 +317,57 @@ export async function fetchListing(spec: FetchSpec, limit = 25): Promise<RedditL
       url,
       fetchedAt,
       durationMs: fetchedAt - startedAt,
+      waitedMs,
+      ok: false,
+      error: fetchError.error,
+    });
+    return fetchError;
+  }
+}
+
+export async function fetchSubredditAboutResult(subreddit: string): Promise<RedditAboutResult> {
+  const startedAt = Date.now();
+  const url = `${getBaseUrl()}${withJsonPath(`/r/${subreddit}/about`)}?raw_json=1`;
+  const waitedMs = await waitForRedditCooldown();
+  try {
+    const res = await fetch(url, {
+      headers: {
+        accept: 'application/json'
+      }
+    });
+    const rateLimitState = rememberTooFastResponse(res, url);
+    const parsed = await parseJsonResponse<RedditAboutResponse>(res, url, rateLimitState);
+    const fetchedAt = Date.now();
+    recordDebugEntry({
+      scope: 'about',
+      url,
+      fetchedAt,
+      durationMs: fetchedAt - startedAt,
+      waitedMs,
+      ok: parsed.ok,
+      status: res.status,
+      statusText: res.statusText,
+      contentType: res.headers.get('content-type') || undefined,
+      error: parsed.ok ? undefined : parsed.error,
+    });
+    return parsed;
+  } catch (error) {
+    const fetchError = {
+      ok: false,
+      error: {
+        kind: 'network',
+        message: 'Network error while fetching subreddit profile',
+        url,
+        cause: formatErrorCause(error),
+      },
+    } as const;
+    const fetchedAt = Date.now();
+    recordDebugEntry({
+      scope: 'about',
+      url,
+      fetchedAt,
+      durationMs: fetchedAt - startedAt,
+      waitedMs,
       ok: false,
       error: fetchError.error,
     });
@@ -219,49 +376,29 @@ export async function fetchListing(spec: FetchSpec, limit = 25): Promise<RedditL
 }
 
 export async function fetchSubredditAbout(subreddit: string): Promise<RedditAboutResponse | null> {
-  const startedAt = Date.now();
-  try {
-    const url = `${getBaseUrl()}${withJsonPath(`/r/${subreddit}/about`)}?raw_json=1`;
-    const res = await fetch(url, {
-      headers: {
-        accept: 'application/json'
-      }
-    });
-    const parsed = await parseJsonResponse<RedditAboutResponse>(res, url);
-    const fetchedAt = Date.now();
-    recordDebugEntry({
-      scope: 'about',
-      url,
-      fetchedAt,
-      durationMs: fetchedAt - startedAt,
-      ok: parsed.ok,
-      status: res.status,
-      statusText: res.statusText,
-      contentType: res.headers.get('content-type') || undefined,
-      error: parsed.ok ? undefined : parsed.error,
-    });
-    return parsed.ok ? parsed.data : null;
-  } catch {
-    return null;
-  }
+  const result = await fetchSubredditAboutResult(subreddit);
+  return result.ok ? result.data : null;
 }
 
 export async function fetchSubredditSidebar(subreddit: string): Promise<string | null> {
   const startedAt = Date.now();
+  const url = `${getBaseUrl()}${withJsonPath(`/r/${subreddit}/about`)}?raw_json=1`;
+  const waitedMs = await waitForRedditCooldown();
   try {
-    const url = `${getBaseUrl()}${withJsonPath(`/r/${subreddit}/about`)}?raw_json=1`;
     const res = await fetch(url, {
       headers: {
         accept: 'application/json'
       }
     });
-    const parsed = await parseJsonResponse<RedditAboutResponse>(res, url);
+    const rateLimitState = rememberTooFastResponse(res, url);
+    const parsed = await parseJsonResponse<RedditAboutResponse>(res, url, rateLimitState);
     const fetchedAt = Date.now();
     recordDebugEntry({
       scope: 'sidebar',
       url,
       fetchedAt,
       durationMs: fetchedAt - startedAt,
+      waitedMs,
       ok: parsed.ok,
       status: res.status,
       statusText: res.statusText,
@@ -271,7 +408,23 @@ export async function fetchSubredditSidebar(subreddit: string): Promise<string |
     if (!parsed.ok) return null;
     const json = parsed.data;
     return (json.data?.description as string) || (json.data?.public_description as string) || null;
-  } catch {
+  } catch (error) {
+    const fetchError = {
+      kind: 'network',
+      message: 'Network error while fetching subreddit sidebar',
+      url,
+      cause: formatErrorCause(error),
+    } satisfies RedditRequestError;
+    const fetchedAt = Date.now();
+    recordDebugEntry({
+      scope: 'sidebar',
+      url,
+      fetchedAt,
+      durationMs: fetchedAt - startedAt,
+      waitedMs,
+      ok: false,
+      error: fetchError,
+    });
     return null;
   }
 }
