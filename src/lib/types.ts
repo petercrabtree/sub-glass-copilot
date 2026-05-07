@@ -150,6 +150,9 @@ export interface FeedSnapshot {
   updatedAt: number;
 }
 
+export type RedditListingSort = 'hot' | 'new' | 'top' | 'rising' | 'controversial';
+export type RedditListingTime = 'hour' | 'day' | 'week' | 'month' | 'year' | 'all';
+
 export interface SubredditRouletteSettings {
   subredditCount: number;
   imagesPerRound: number;
@@ -157,4 +160,6 @@ export interface SubredditRouletteSettings {
   newWeight: number;
   randomWeight: number;
   nsfwMode: 'yes' | 'no' | 'only';
+  listingSort: RedditListingSort;
+  listingTime: RedditListingTime;
 }

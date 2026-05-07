@@ -1,5 +1,13 @@
-import type { SubredditRecord, SubredditRouletteSettings } from '$lib/types';
+import type {
+  RedditListingSort,
+  RedditListingTime,
+  SubredditRecord,
+  SubredditRouletteSettings,
+} from '$lib/types';
 import { isSubredditUnavailable } from '$lib/db/store';
+
+export const ROULETTE_LISTING_SORTS: RedditListingSort[] = ['hot', 'new', 'top', 'rising', 'controversial'];
+export const ROULETTE_LISTING_TIMES: RedditListingTime[] = ['hour', 'day', 'week', 'month', 'year', 'all'];
 
 export const DEFAULT_ROULETTE_SETTINGS: SubredditRouletteSettings = {
   subredditCount: 10,
@@ -8,6 +16,8 @@ export const DEFAULT_ROULETTE_SETTINGS: SubredditRouletteSettings = {
   newWeight: 2,
   randomWeight: 1,
   nsfwMode: 'only',
+  listingSort: 'top',
+  listingTime: 'month',
 };
 
 export const ROULETTE_SETTINGS_STORAGE_KEY = 'subglass:roulette-settings';
@@ -15,6 +25,8 @@ type NsfwMode = SubredditRouletteSettings['nsfwMode'];
 type RouletteWeightKind = 'liked' | 'new' | 'random';
 type StoredRouletteSettings = Partial<SubredditRouletteSettings> & {
   includeNsfw?: boolean;
+  sort?: unknown;
+  time?: unknown;
 };
 const ROULETTE_WEIGHT_KINDS: RouletteWeightKind[] = ['liked', 'new', 'random'];
 
@@ -57,6 +69,8 @@ export function normalizeRouletteSettings(
       DEFAULT_ROULETTE_SETTINGS.randomWeight
     ),
     nsfwMode: normalizeNsfwMode(settings),
+    listingSort: normalizeListingSort(settings?.listingSort ?? settings?.sort),
+    listingTime: normalizeListingTime(settings?.listingTime ?? settings?.time),
   };
 }
 
@@ -68,6 +82,22 @@ function normalizeNsfwMode(settings: StoredRouletteSettings | null | undefined):
   if (isNsfwMode(settings?.nsfwMode)) return settings.nsfwMode;
   if (settings?.includeNsfw === false) return 'no';
   return DEFAULT_ROULETTE_SETTINGS.nsfwMode;
+}
+
+function normalizeListingSort(value: unknown): RedditListingSort {
+  return ROULETTE_LISTING_SORTS.includes(value as RedditListingSort)
+    ? (value as RedditListingSort)
+    : DEFAULT_ROULETTE_SETTINGS.listingSort;
+}
+
+function normalizeListingTime(value: unknown): RedditListingTime {
+  return ROULETTE_LISTING_TIMES.includes(value as RedditListingTime)
+    ? (value as RedditListingTime)
+    : DEFAULT_ROULETTE_SETTINGS.listingTime;
+}
+
+export function isTimedRouletteListingSort(sort: RedditListingSort): boolean {
+  return sort === 'top' || sort === 'controversial';
 }
 
 export function readStoredRouletteSettings(): SubredditRouletteSettings {
@@ -246,4 +276,12 @@ export function chooseRouletteSubreddits(
 
 export function formatRouletteBundle(subreddits: Pick<SubredditRecord, 'name'>[]): string {
   return subreddits.map((sub) => sub.name).join('+');
+}
+
+export function formatRouletteRoutePath(bundle: string, settingsInput: SubredditRouletteSettings): string {
+  const settings = normalizeRouletteSettings(settingsInput);
+  const params = new URLSearchParams();
+  if (isTimedRouletteListingSort(settings.listingSort)) params.set('t', settings.listingTime);
+  params.set('roulette', '1');
+  return `/r/${bundle}/${settings.listingSort}?${params.toString()}`;
 }

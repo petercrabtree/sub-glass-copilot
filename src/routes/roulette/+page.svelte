@@ -3,10 +3,14 @@
   import { onMount } from 'svelte';
   import {
     DEFAULT_ROULETTE_SETTINGS,
+    ROULETTE_LISTING_SORTS,
+    ROULETTE_LISTING_TIMES,
     chooseRouletteSubreddits,
+    formatRouletteRoutePath,
     formatRouletteBundle,
     getRouletteCandidateWeight,
     getRouletteCandidates,
+    isTimedRouletteListingSort,
     normalizeRouletteSettings,
     persistRouletteSettings,
     readStoredRouletteSettings,
@@ -30,6 +34,8 @@
       .slice(0, 40)
   );
   const selectedBundle = $derived(formatRouletteBundle(selected));
+  const selectedRoutePath = $derived(selectedBundle ? formatRouletteRoutePath(selectedBundle, settings) : '');
+  const sortUsesTime = $derived(isTimedRouletteListingSort(settings.listingSort));
 
   onMount(async () => {
     settings = readStoredRouletteSettings();
@@ -55,6 +61,18 @@
     updateSettings({ [key]: Number((event.currentTarget as HTMLInputElement).value) });
   }
 
+  function handleSelectInput(
+    key: 'listingSort' | 'listingTime',
+    event: Event
+  ) {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    if (key === 'listingSort') {
+      updateSettings({ listingSort: value as SubredditRouletteSettings['listingSort'] });
+    } else {
+      updateSettings({ listingTime: value as SubredditRouletteSettings['listingTime'] });
+    }
+  }
+
   function reroll() {
     selected = chooseRouletteSubreddits(subreddits, settings, selected.map((sub) => sub.name));
   }
@@ -68,7 +86,7 @@
       return;
     }
 
-    await goto(`/r/${selectedBundle}?roulette=1`);
+    await goto(selectedRoutePath);
   }
 
   async function scanNext() {
@@ -116,6 +134,29 @@
       <div class="loading">Loading known subreddits...</div>
     {:else}
       <section class="control-band">
+        <label>
+          <span>sort</span>
+          <select
+            value={settings.listingSort}
+            onchange={(event) => handleSelectInput('listingSort', event)}
+          >
+            {#each ROULETTE_LISTING_SORTS as sort}
+              <option value={sort}>{sort}</option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          <span>time</span>
+          <select
+            value={settings.listingTime}
+            disabled={!sortUsesTime}
+            onchange={(event) => handleSelectInput('listingTime', event)}
+          >
+            {#each ROULETTE_LISTING_TIMES as time}
+              <option value={time}>{time}</option>
+            {/each}
+          </select>
+        </label>
         <label>
           <span>subreddits</span>
           <input
@@ -197,10 +238,10 @@
       <section class="round-panel">
         <div class="section-heading">
           <h2>Next Round</h2>
-          <span>{selected.length}/{settings.subredditCount} subs · {settings.imagesPerRound} images</span>
+          <span>{settings.listingSort}{sortUsesTime ? `/${settings.listingTime}` : ''} · {selected.length}/{settings.subredditCount} subs · {settings.imagesPerRound} images</span>
         </div>
         {#if selected.length > 0}
-          <div class="bundle-path">/r/{selectedBundle}</div>
+          <div class="bundle-path">{selectedRoutePath}</div>
           <div class="selected-list">
             {#each selected as sub}
               <a href="/r/{sub.name}" class="selected-sub">
@@ -302,6 +343,16 @@
     border-radius: 5px;
     padding: 7px 8px;
   }
+  .control-band select {
+    width: 100%;
+    min-width: 0;
+    background: #151515;
+    border: 1px solid #333;
+    color: #e0e0e0;
+    border-radius: 5px;
+    padding: 7px 8px;
+  }
+  .control-band select:disabled { opacity: 0.5; }
   .control-band input[type='range'] { width: 100%; }
   .control-band strong { color: #c7d7e4; font-size: 0.78rem; min-width: 2ch; }
   .segmented-row { grid-template-columns: 74px minmax(0, 1fr); }

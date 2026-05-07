@@ -12,8 +12,12 @@
   import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import {
     DEFAULT_ROULETTE_SETTINGS,
+    ROULETTE_LISTING_SORTS,
+    ROULETTE_LISTING_TIMES,
     chooseRouletteSubreddits,
+    formatRouletteRoutePath,
     formatRouletteBundle,
+    isTimedRouletteListingSort,
     normalizeRouletteSettings,
     persistRouletteSettings,
     readStoredRouletteSettings,
@@ -905,6 +909,7 @@
   const rouletteRoundProgress = $derived(
     Math.min(currentIndex + 1, rouletteSettings.imagesPerRound)
   );
+  const rouletteSortUsesTime = $derived(isTimedRouletteListingSort(rouletteSettings.listingSort));
   const autoAdvanceSuspended = $derived(
     autoAdvancePaused ||
     viewerUiEngaged ||
@@ -1107,6 +1112,8 @@
     void rouletteSettings.newWeight;
     void rouletteSettings.randomWeight;
     void rouletteSettings.nsfwMode;
+    void rouletteSettings.listingSort;
+    void rouletteSettings.listingTime;
     persistRouletteSettings(rouletteSettings);
   });
 
@@ -1268,7 +1275,7 @@
       }
 
       const bundle = formatRouletteBundle(selected);
-      await goto(`/r/${bundle}?${ROULETTE_QUERY_PARAM}=1`);
+      await goto(formatRouletteRoutePath(bundle, rouletteSettings));
     } finally {
       rouletteTransitioning = false;
     }
@@ -1286,6 +1293,18 @@
     event: Event
   ) {
     updateRouletteSettings({ [key]: Number((event.currentTarget as HTMLInputElement).value) });
+  }
+
+  function handleRouletteSelectInput(
+    key: 'listingSort' | 'listingTime',
+    event: Event
+  ) {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    if (key === 'listingSort') {
+      updateRouletteSettings({ listingSort: value as SubredditRouletteSettings['listingSort'] });
+    } else {
+      updateRouletteSettings({ listingTime: value as SubredditRouletteSettings['listingTime'] });
+    }
   }
 
   async function ensureSubreddit(
@@ -2204,6 +2223,29 @@
 	            <span class="menu-label">roulette</span>
 	            <div class="roulette-settings-grid">
 	              <label class="roulette-setting">
+	                <span>sort</span>
+	                <select
+	                  value={rouletteSettings.listingSort}
+	                  onchange={(event) => handleRouletteSelectInput('listingSort', event)}
+	                >
+	                  {#each ROULETTE_LISTING_SORTS as sort}
+	                    <option value={sort}>{sort}</option>
+	                  {/each}
+	                </select>
+	              </label>
+	              <label class="roulette-setting">
+	                <span>time</span>
+	                <select
+	                  value={rouletteSettings.listingTime}
+	                  disabled={!rouletteSortUsesTime}
+	                  onchange={(event) => handleRouletteSelectInput('listingTime', event)}
+	                >
+	                  {#each ROULETTE_LISTING_TIMES as time}
+	                    <option value={time}>{time}</option>
+	                  {/each}
+	                </select>
+	              </label>
+	              <label class="roulette-setting">
 	                <span>subs</span>
 	                <input
 	                  type="number"
@@ -2954,6 +2996,21 @@
     color: #edf6ff;
     padding: 6px 7px;
     font-size: 0.74rem;
+  }
+
+  .roulette-setting select {
+    width: 100%;
+    min-width: 0;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(6, 9, 13, 0.72);
+    color: #edf6ff;
+    padding: 6px 7px;
+    font-size: 0.74rem;
+  }
+
+  .roulette-setting select:disabled {
+    opacity: 0.5;
   }
 
   .roulette-setting input[type='range'] {
