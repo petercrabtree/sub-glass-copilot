@@ -1,3 +1,4 @@
+import { extractRedgifsId } from '$lib/media/redgifs';
 import type { PostRecord, MediaGroup, MediaItem } from '$lib/types';
 
 const IMAGE_URL_PATTERN = /\.(jpg|jpeg|png|gif|webp|svg)(\?.*)?$/i;
@@ -88,11 +89,14 @@ function extractRedgifsEmbedItem(postData: Record<string, unknown>): MediaItem |
     const mediaEmbed = asRecord(candidate.media_embed);
     const oembed = asRecord(secureMedia?.oembed);
     const providerType = asString(secureMedia?.type) ?? domain;
-    const embedUrl = [
+    const sourceUrl = asString(candidate.url);
+    const redditEmbedUrl = [
       extractIframeSrc(asString(oembed?.html)),
       extractIframeSrc(asString(secureMediaEmbed?.content)),
       extractIframeSrc(asString(mediaEmbed?.content)),
     ].find((url): url is string => Boolean(url));
+    const externalId = extractRedgifsId(sourceUrl) || extractRedgifsId(redditEmbedUrl);
+    const embedUrl = redditEmbedUrl || (externalId ? `https://www.redgifs.com/ifr/${externalId}` : undefined);
 
     if (!embedUrl || !/(^https?:\/\/)?(?:www\.|v3\.)?redgifs\.com\//i.test(embedUrl)) {
       continue;
@@ -105,12 +109,14 @@ function extractRedgifsEmbedItem(postData: Record<string, unknown>): MediaItem |
     const posterUrl =
       asVisualUrl(candidate.thumbnail) ||
       asVisualUrl(oembed?.thumbnail_url);
-    const openUrl = asString(candidate.url) || embedUrl;
+    const openUrl = sourceUrl || embedUrl;
 
     return {
       url: posterUrl || openUrl,
       openUrl,
       embedUrl,
+      provider: 'redgifs',
+      externalId,
       width: asNumber(oembed?.width) ?? asNumber(secureMediaEmbed?.width) ?? asNumber(mediaEmbed?.width),
       height: asNumber(oembed?.height) ?? asNumber(secureMediaEmbed?.height) ?? asNumber(mediaEmbed?.height),
     };
@@ -220,6 +226,10 @@ export function normalizePost(rawData: Record<string, unknown>): PostRecord | nu
   if (!id) return null;
 
   const media = extractMediaGroup(rawData, id);
+  const crosspostParent = Array.isArray(rawData.crosspost_parent_list)
+    ? asRecord(rawData.crosspost_parent_list[0])
+    : undefined;
+  const crosspostParentSubreddit = asString(crosspostParent?.subreddit)?.toLowerCase();
 
   return {
     id,
@@ -233,11 +243,13 @@ export function normalizePost(rawData: Record<string, unknown>): PostRecord | nu
     flair: rawData.link_flair_text as string || undefined,
     isNsfw: Boolean(rawData.over_18),
     isSelf: Boolean(rawData.is_self),
+    selftext: asString(rawData.selftext),
     score: rawData.score as number || 0,
     numComments: rawData.num_comments as number || 0,
     createdAt: (rawData.created_utc as number || 0) * 1000,
     media,
     crosspostParentId: rawData.crosspost_parent as string || undefined,
+    crosspostParentSubreddit,
     rawSnapshot: {
       thumbnail: rawData.thumbnail,
       preview: rawData.preview,

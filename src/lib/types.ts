@@ -1,15 +1,24 @@
+export type SubredditDiscoveryStatus = 'discovered' | 'verified' | 'failed' | 'muted';
+
 export interface SubredditRecord {
   name: string;
   prefixedName: string;
   displayName?: string;
   title?: string;
   description?: string;
+  publicDescription?: string;
   subscribers?: number;
   isNsfw?: boolean;
   firstSeenAt: number;
   lastFetchedAt?: number;
   localRating: number;
   isMuted: boolean;
+  discoveryStatus?: SubredditDiscoveryStatus;
+  discoveredVia?: string;
+  discoveryReason?: string;
+  profileFetchedAt?: number;
+  profileFetchFailedAt?: number;
+  profileFetchError?: string;
   adjacencyScannedAt?: number;
 }
 
@@ -19,6 +28,9 @@ export interface AdjacencyLink {
   source: 'description' | 'sidebar' | 'crosspost' | 'mention' | 'widget';
   evidence?: string;
   discoveredAt: number;
+  lastSeenAt?: number;
+  count?: number;
+  weight?: number;
 }
 
 export type MediaKind = 'image' | 'video' | 'gallery' | 'external_image' | 'external_video' | 'unknown';
@@ -32,6 +44,10 @@ export interface MediaItem {
   hlsUrl?: string;
   openUrl?: string;
   embedUrl?: string;
+  provider?: 'redgifs' | string;
+  externalId?: string;
+  durationSeconds?: number;
+  hasAudio?: boolean;
 }
 
 export interface MediaGroup {
@@ -55,11 +71,13 @@ export interface PostRecord {
   flair?: string;
   isNsfw: boolean;
   isSelf: boolean;
+  selftext?: string;
   score: number;
   numComments: number;
   createdAt: number;
   media?: MediaGroup;
   crosspostParentId?: string;
+  crosspostParentSubreddit?: string;
   rawSnapshot?: unknown;
   seenAt?: number;
   localRating?: 1 | -1;
@@ -105,4 +123,26 @@ export interface CacheEntry {
   fetchedAt: number;
   after?: string;
   postIds: string[];
+}
+
+export interface FeedSnapshot {
+  routeKey: string;
+  path: string;
+  subreddits: string[];
+  time?: string;
+  afterCursor?: string | null;
+  postIds: string[];
+  currentIndex: number;
+  galleryIndex: number;
+  scrollTop?: number;
+  updatedAt: number;
+}
+
+export interface SubredditRouletteSettings {
+  subredditCount: number;
+  imagesPerRound: number;
+  likedWeight: number;
+  newWeight: number;
+  randomWeight: number;
+  includeNsfw: boolean;
 }

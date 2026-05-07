@@ -6,6 +6,7 @@
   import { fetchListing, readRedditDebugState } from '$lib/transport/reddit';
   import type { RedditDebugState, RedditRequestError } from '$lib/transport/reddit';
   import { normalizeListingResponse } from '$lib/normalize/posts';
+  import { enrichRedgifsPosts } from '$lib/media/redgifs';
   import {
     upsertPost, upsertSubreddit, upsertMedia, upsertAdjacency,
     markPostSeen, setPostRating, getPost, getSeenPostIds, addEvent,
@@ -62,8 +63,11 @@
     cacheState: MediaCacheState;
   };
 
+  type ViewerUiMode = 'full' | 'mini' | 'hidden';
+
   const DISPLAY_MODE_STORAGE_KEY = 'subglass:display-mode';
   const AUTO_ADVANCE_SETTINGS_STORAGE_KEY = 'subglass:auto-advance-settings';
+  const VIEWER_UI_MODE_STORAGE_KEY = 'subglass:viewer-ui-mode';
   const MIN_VIDEO_ADVANCE_MS = 5000;
   const VIEWER_UI_DISENGAGE_DELAY_MS = 900;
   const DISPLAY_MODES: Array<{
@@ -78,6 +82,15 @@
     { id: 'wild', label: 'wild', blurb: 'Layered collage chaos', action: 'display_wild' },
     { id: 'wild2', label: 'wild2', blurb: 'Orbital magazine spread', action: 'display_wild2' },
     { id: 'wild3', label: 'wild3', blurb: 'Ribbon wall drift', action: 'display_wild3' },
+  ];
+  const VIEWER_UI_MODES: Array<{
+    id: ViewerUiMode;
+    label: string;
+    blurb: string;
+  }> = [
+    { id: 'full', label: 'full', blurb: 'Compact chrome with expanded detail available' },
+    { id: 'mini', label: 'mini', blurb: 'Tiny corner chrome with menus on demand' },
+    { id: 'hidden', label: 'hide', blurb: 'Hide chrome until the tiny UI control is used' },
   ];
   const WILD_CARD_OFFSETS = [-3, -2, -1, 0, 1, 2, 3] as const;
 
@@ -95,6 +108,7 @@
   let listingTime = $state<string | undefined>(undefined);
   let currentMediaLoadState = $state<'loading' | 'ready' | 'error'>('loading');
   let displayMode = $state<DisplayMode>('fill');
+  let viewerUiMode = $state<ViewerUiMode>('full');
   let debugExpanded = $state(false);
   let scrollFeedEl = $state<HTMLDivElement | null>(null);
   let masonryFeedEl = $state<HTMLDivElement | null>(null);
@@ -115,6 +129,7 @@
   let mediaCacheByUrl = $state<Record<string, boolean>>({});
   let mediaCacheRuntime = $state<MediaCacheRuntimeState>('inactive');
   let mediaCacheProbeGeneration = 0;
+  let lastVideoLoopBoundaryAt = $state(0);
 
   function formatErrorJson(feedError: RedditRequestError): string {
     return JSON.stringify(feedError, null, 2);
@@ -201,6 +216,27 @@
     return typeof isCached === 'boolean' ? (isCached ? 'cached' : 'live') : 'checking';
   }
 
+  function formatLoadedMediaKind(kind: MediaKind | 'unknown') {
+    return kind.replaceAll('_', ' ');
+  }
+
+  function formatLoadedMediaCacheState(cacheState: MediaCacheState) {
+    switch (cacheState) {
+      case 'cached':
+        return 'cached';
+      case 'live':
+        return 'network';
+      case 'checking':
+        return 'checking';
+      case 'inactive':
+        return 'cache off';
+      case 'unsupported':
+        return 'unsupported';
+      case 'skipped':
+        return 'n/a';
+    }
+  }
+
   async function refreshMediaCacheRuntime() {
     if (typeof window === 'undefined') return;
 
@@ -272,6 +308,38 @@
     );
   }
 
+  function getVideoAdvanceTargetLoopCount(durationSeconds: number) {
+    const durationMs = Math.round(durationSeconds * 1000);
+    if (durationMs <= 0) return 0;
+
+    const requiredPlayedMs = Math.max(
+      MIN_VIDEO_ADVANCE_MS,
+      Math.round(durationSeconds * 1000 * videoAdvancePlays)
+    );
+
+    return Math.ceil((autoAdvanceVideoAnchorPlayedMs + requiredPlayedMs) / durationMs);
+  }
+
+  function hasReachedVideoAdvanceBoundary(snapshot: VideoTiming | null = currentVideoTiming) {
+    if (!snapshot?.duration) return false;
+    return snapshot.completedLoops >= getVideoAdvanceTargetLoopCount(snapshot.duration);
+  }
+
+  function canAutoAdvanceFromVideoBoundary(snapshot: VideoTiming | null = currentVideoTiming) {
+    return (
+      currentMedia?.kind === 'video' &&
+      !autoAdvanceSuspended &&
+      !autoAdvanceInFlight &&
+      hasForwardTarget() &&
+      hasReachedVideoAdvanceBoundary(snapshot)
+    );
+  }
+
+  function maybeRunAutoAdvanceFromVideoBoundary(snapshot: VideoTiming | null = currentVideoTiming) {
+    if (!canAutoAdvanceFromVideoBoundary(snapshot)) return;
+    void runAutoAdvance('video-boundary');
+  }
+
   function mergeVideoTimingSnapshot(nextSample: {
     currentTime: number;
     duration: number;
@@ -280,20 +348,53 @@
     const duration = Number.isFinite(nextSample.duration) ? Math.max(0, nextSample.duration) : 0;
     const currentTime = Number.isFinite(nextSample.currentTime) ? Math.max(0, nextSample.currentTime) : 0;
     const previous = currentVideoTiming;
-
-    const loopCompleted =
+    const boundaryDetected = Boolean(
       previous &&
       previous.duration > 0 &&
       duration > 0 &&
-      previous.currentTime >= previous.duration - 0.45 &&
-      currentTime <= 0.75;
+      !previous.paused &&
+      !nextSample.paused &&
+      previous.currentTime > duration * 0.85 &&
+      currentTime <= Math.min(1.25, Math.max(0.35, duration * 0.2)) &&
+      previous.currentTime - currentTime >= Math.max(0.5, duration * 0.5)
+    );
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const canRecordBoundary = boundaryDetected && now - lastVideoLoopBoundaryAt >= 250;
 
-    currentVideoTiming = {
+    const updatedTiming = {
       currentTime,
       duration,
       paused: nextSample.paused,
-      completedLoops: (previous?.completedLoops ?? 0) + (loopCompleted ? 1 : 0),
+      completedLoops: (previous?.completedLoops ?? 0) + (canRecordBoundary ? 1 : 0),
     };
+    currentVideoTiming = updatedTiming;
+
+    if (canRecordBoundary) {
+      lastVideoLoopBoundaryAt = now;
+      maybeRunAutoAdvanceFromVideoBoundary(updatedTiming);
+    }
+  }
+
+  function markVideoLoopBoundary() {
+    const current = currentVideoTiming;
+    if (!current || !current.duration) return;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (now - lastVideoLoopBoundaryAt < 250) return;
+
+    lastVideoLoopBoundaryAt = now;
+
+    const updatedTiming = {
+      ...current,
+      currentTime: 0,
+      completedLoops: current.completedLoops + 1,
+    };
+    currentVideoTiming = updatedTiming;
+    maybeRunAutoAdvanceFromVideoBoundary(updatedTiming);
+  }
+
+  function captureActiveTileVideoLoop(index: number) {
+    if (index !== currentIndex) return;
+    markVideoLoopBoundary();
   }
 
   function readStoredAutoAdvanceSettings() {
@@ -360,6 +461,40 @@
     }
   }
 
+  function isViewerUiMode(value: string | null): value is ViewerUiMode {
+    return VIEWER_UI_MODES.some((mode) => mode.id === value);
+  }
+
+  function readStoredViewerUiMode(): ViewerUiMode | null {
+    if (typeof window === 'undefined') return null;
+
+    try {
+      const stored = window.localStorage.getItem(VIEWER_UI_MODE_STORAGE_KEY);
+      return isViewerUiMode(stored) ? stored : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function persistViewerUiMode(mode: ViewerUiMode) {
+    if (typeof window === 'undefined') return;
+
+    try {
+      window.localStorage.setItem(VIEWER_UI_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Ignore storage failures in private mode or restricted environments.
+    }
+  }
+
+  function setViewerUiMode(mode: ViewerUiMode) {
+    viewerUiMode = mode;
+    persistViewerUiMode(mode);
+    if (mode !== 'hidden') {
+      engageViewerUi();
+      releaseViewerUiSoon();
+    }
+  }
+
   function prefersReducedMotion(): boolean {
     return typeof window !== 'undefined' &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -399,6 +534,7 @@
     currentVideoTiming = media?.kind === 'video'
       ? { currentTime: 0, duration: 0, paused: false, completedLoops: 0 }
       : null;
+    lastVideoLoopBoundaryAt = 0;
     resetAutoAdvanceClock(0);
     autoAdvanceInFlight = false;
 
@@ -542,6 +678,7 @@
   const autoAdvanceSuspended = $derived(
     autoAdvancePaused ||
     viewerUiEngaged ||
+    currentMedia?.kind === 'external_video' ||
     (currentMedia?.kind === 'video' && currentVideoTiming?.paused === true)
   );
   const loadedMediaCacheUrls = $derived(
@@ -576,6 +713,21 @@
         cacheState: resolveLoadedMediaCacheState(cacheUrl),
       };
     })
+  );
+  const cacheableLoadedMediaCount = $derived(
+    loadedMediaStates.filter((item) => item.cacheState !== 'skipped').length
+  );
+  const cachedLoadedMediaCount = $derived(
+    loadedMediaStates.filter((item) => item.cacheState === 'cached').length
+  );
+  const loadedMediaCacheSummary = $derived(
+    mediaCacheRuntime === 'ready'
+      ? cacheableLoadedMediaCount > 0
+        ? `${cachedLoadedMediaCount}/${cacheableLoadedMediaCount} cached`
+        : 'cache ready'
+      : mediaCacheRuntime === 'unsupported'
+        ? 'cache unsupported'
+        : 'cache inactive'
   );
   const displayTiles = $derived(
     posts
@@ -655,9 +807,11 @@
   );
   const autoAdvanceSummary = $derived(
     autoAdvanceSuspended
-      ? currentMedia?.kind === 'video' && currentVideoTiming?.paused
-        ? 'video paused'
-        : 'autonext paused'
+      ? currentMedia?.kind === 'external_video'
+        ? 'external video: autonext unavailable'
+        : currentMedia?.kind === 'video' && currentVideoTiming?.paused
+          ? 'video paused'
+          : 'autonext paused'
       : currentMedia?.kind === 'video'
         ? currentVideoTiming?.duration
           ? `end ${formatCountdown(currentVideoEndsInMs)} · next ${formatCountdown(autoAdvanceRemainingMs)}`
@@ -796,7 +950,7 @@
     }
 
     afterCursor = result.data.data.after || null;
-    const normalized = normalizeListingResponse(result.data.data.children);
+    const normalized = await enrichRedgifsPosts(normalizeListingResponse(result.data.data.children));
     const mediaPosts = normalized.filter((post) => post.media);
 
     await Promise.all(mediaPosts.map(async (post) => {
@@ -834,7 +988,7 @@
 
     if (result.ok) {
       afterCursor = result.data.data.after || null;
-      const normalized = normalizeListingResponse(result.data.data.children);
+      const normalized = await enrichRedgifsPosts(normalizeListingResponse(result.data.data.children));
       const mediaPosts = normalized.filter((post) => post.media);
 
       await Promise.all(mediaPosts.map(async (post) => {
@@ -1026,6 +1180,8 @@
   }
 
   function canAutoAdvanceNow() {
+    if (!currentMedia || currentMedia.kind === 'video') return false;
+
     return (
       !autoAdvanceSuspended &&
       autoAdvanceRemainingMs !== null &&
@@ -1035,8 +1191,14 @@
     );
   }
 
-  async function runAutoAdvance() {
-    if (!canAutoAdvanceNow() || !currentMedia) return;
+  async function runAutoAdvance(trigger: 'timer' | 'video-boundary' = 'timer') {
+    if (!currentMedia) return;
+
+    const canRun = trigger === 'video-boundary'
+      ? canAutoAdvanceFromVideoBoundary()
+      : canAutoAdvanceNow();
+
+    if (!canRun) return;
 
     autoAdvanceInFlight = true;
 
@@ -1150,6 +1312,10 @@
     if (storedMode) {
       displayMode = storedMode;
     }
+    const storedViewerUiMode = readStoredViewerUiMode();
+    if (storedViewerUiMode) {
+      viewerUiMode = storedViewerUiMode;
+    }
     const storedAutoAdvance = readStoredAutoAdvanceSettings();
     if (storedAutoAdvance) {
       imageAdvanceSeconds = storedAutoAdvance.imageSeconds;
@@ -1203,6 +1369,7 @@
   class="viewer-page"
   data-feed-status={feedStatus}
   data-display-mode={displayMode}
+  data-ui-mode={viewerUiMode}
   role="region"
   aria-label="Media viewer"
 >
@@ -1262,10 +1429,12 @@
                 onevent={(detail) => addEvent({ ...detail, ts: Date.now(), type: detail.type as Parameters<typeof addEvent>[0]['type'] })}
                 onstatechange={handleMediaStateChange}
                 ontimingchange={handleVideoTimingChange}
+                onvideoended={markVideoLoopBoundary}
               />
             {/key}
             <PostOverlay
               post={currentPost}
+              uiMode={viewerUiMode}
               mediaIndex={galleryIndex}
               totalMedia={totalItems}
               postIndex={currentIndex}
@@ -1309,6 +1478,7 @@
                       ontimeupdate={(event) => captureActiveTileVideoTiming(tile.index, event)}
                       onplay={(event) => captureActiveTileVideoTiming(tile.index, event)}
                       onpause={(event) => captureActiveTileVideoTiming(tile.index, event)}
+                      onended={() => captureActiveTileVideoLoop(tile.index)}
                     ></video>
                   {:else}
                     <img src={tile.item.url} alt={tile.post.title} class="tile-image" loading="lazy" />
@@ -1396,6 +1566,7 @@
                       ontimeupdate={(event) => captureActiveTileVideoTiming(tile.index, event)}
                       onplay={(event) => captureActiveTileVideoTiming(tile.index, event)}
                       onpause={(event) => captureActiveTileVideoTiming(tile.index, event)}
+                      onended={() => captureActiveTileVideoLoop(tile.index)}
                     ></video>
                   {:else}
                     <img src={tile.item.url} alt={tile.post.title} class="tile-image" loading="lazy" />
@@ -1486,6 +1657,7 @@
                       ontimeupdate={(event) => captureActiveTileVideoTiming(tile.index, event)}
                       onplay={(event) => captureActiveTileVideoTiming(tile.index, event)}
                       onpause={(event) => captureActiveTileVideoTiming(tile.index, event)}
+                      onended={() => captureActiveTileVideoLoop(tile.index)}
                     ></video>
                   {:else}
                     <img src={tile.item.url} alt={tile.post.title} class="wild-card-media" />
@@ -1501,6 +1673,7 @@
             {#if currentPost && currentMedia}
               <PostOverlay
                 post={currentPost}
+                uiMode={viewerUiMode}
                 mediaIndex={galleryIndex}
                 totalMedia={totalItems}
                 postIndex={currentIndex}
@@ -1531,124 +1704,221 @@
     {/if}
   </div>
 
-  <nav
-    class="topbar"
-    onpointerenter={engageViewerUi}
+	  <nav
+	    class="topbar"
+	    onpointerenter={engageViewerUi}
     onpointerleave={releaseViewerUiSoon}
-    onfocusin={engageViewerUi}
-    onfocusout={handleViewerSurfaceFocusOut}
-  >
-    <a href="/r/all" class="logo">SubGlass</a>
+	    onfocusin={engageViewerUi}
+	    onfocusout={handleViewerSurfaceFocusOut}
+	  >
+	    <div class="topbar-nav">
+	      <a href="/r/all" class="logo">SubGlass</a>
+	      <span class="route-chip" title={pathInput}>{pathInput || '/r/all'}</span>
+	      <span class="mode-chip" title={currentDisplayMode.blurb}>{currentDisplayMode.label}</span>
+	      <span class="ui-mode-chip">{viewerUiMode}</span>
 
-    <form onsubmit={(event) => { event.preventDefault(); navigate(); }} class="path-form">
-      <input
-        type="text"
-        bind:value={pathInput}
-        placeholder="/r/subreddit"
-        class="path-input"
-        aria-label="Subreddit path"
-      />
-      <button type="submit">Go</button>
-    </form>
+	      <details class="topbar-menu">
+	        <summary aria-label="Viewer menu">menu</summary>
+	        <div class="topbar-menu-panel">
+	          <form onsubmit={(event) => { event.preventDefault(); navigate(); }} class="path-form">
+	            <input
+	              type="text"
+	              bind:value={pathInput}
+	              placeholder="/r/subreddit"
+	              class="path-input"
+	              aria-label="Subreddit path"
+	            />
+	            <button type="submit">Go</button>
+	          </form>
 
-    <div class="nav-links">
-      <a href="/r/all">all</a>
-      <a href="/r/pics">pics</a>
-      <a href="/r/videos">videos</a>
-      <a href="/discover">discover</a>
-      <a href="/admin">admin</a>
-    </div>
+	          <div class="menu-section">
+	            <span class="menu-label">places</span>
+	            <div class="nav-links">
+	              <a href="/r/all">all</a>
+	              <a href="/r/pics">pics</a>
+	              <a href="/r/videos">videos</a>
+	              <a href="/discover">discover</a>
+	              <a href="/admin">admin</a>
+	            </div>
+	          </div>
 
-    <div class="display-switcher" role="tablist" aria-label="Display modes">
-      {#each DISPLAY_MODES as mode}
-        <button
-          type="button"
-          class="display-chip"
-          class:active={displayMode === mode.id}
-          title={`${mode.blurb} (${getViewerShortcut(mode.action).displayKeys.join(' / ')})`}
-          onclick={() => setDisplayMode(mode.id)}
-        >
-          <span>{mode.label}</span>
-        </button>
-      {/each}
-    </div>
-  </nav>
+	          <div class="menu-section">
+	            <span class="menu-label">display</span>
+	            <div class="display-switcher" role="tablist" aria-label="Display modes">
+	              {#each DISPLAY_MODES as mode}
+	                <button
+	                  type="button"
+	                  class="display-chip"
+	                  class:active={displayMode === mode.id}
+	                  title={`${mode.blurb} (${getViewerShortcut(mode.action).displayKeys.join(' / ')})`}
+	                  onclick={() => setDisplayMode(mode.id)}
+	                >
+	                  <span>{mode.label}</span>
+	                </button>
+	              {/each}
+	            </div>
+	          </div>
 
-  {#if currentMedia && !loading && !error}
-    <div
-      class="auto-advance-hud"
-      role="group"
-      aria-label="Auto advance status"
-      data-paused={autoAdvanceSuspended}
-      style={`--auto-advance-progress:${autoAdvanceProgress};`}
-      onpointerenter={engageViewerUi}
-      onpointerleave={releaseViewerUiSoon}
-      onfocusin={engageViewerUi}
-      onfocusout={handleViewerSurfaceFocusOut}
+	          <div class="menu-section">
+	            <span class="menu-label">ui</span>
+	            <div class="ui-switcher" role="radiogroup" aria-label="Viewer UI density">
+	              {#each VIEWER_UI_MODES as mode}
+	                <button
+	                  type="button"
+	                  class="ui-chip"
+	                  role="radio"
+	                  class:active={viewerUiMode === mode.id}
+	                  aria-checked={viewerUiMode === mode.id}
+	                  title={mode.blurb}
+	                  onclick={() => setViewerUiMode(mode.id)}
+	                >
+	                  {mode.label}
+	                </button>
+	              {/each}
+	            </div>
+	          </div>
+	        </div>
+	      </details>
+	    </div>
+
+	    {#if currentPost && currentMedia && !loading && !error}
+	      <div
+	        class="viewer-status"
+	        role="group"
+	        aria-label="Viewer queue and auto-next"
+	        data-paused={autoAdvanceSuspended}
+	        style={`--auto-advance-progress:${autoAdvanceProgress};`}
+	      >
+	        <span class="status-progress" aria-hidden="true"></span>
+	        <span class="status-count counter">{currentIndex + 1} / {posts.length}</span>
+	        {#if totalItems > 1}
+	          <span class="status-count gallery-counter">img {galleryIndex + 1}/{totalItems}</span>
+	        {/if}
+	        <span class="status-subreddit">r/{currentPost.subreddit}</span>
+
+	        <details class="status-menu">
+	          <summary aria-label={`Loaded queue showing ${loadedMediaStates.length} items, ${loadedMediaCacheSummary}`}>
+	            <span class="status-label">queue</span>
+	            <span class="load-summary">{loadedMediaStates.length}</span>
+	            <span class="load-rail" aria-hidden="true">
+	              {#each loadedMediaStates as item (item.id)}
+	                <span
+	                  class="load-chip"
+	                  class:rating-up={item.rating === 1}
+	                  class:rating-down={item.rating === -1}
+	                  class:current={item.index === currentIndex}
+	                  data-kind={item.kind}
+	                  data-status={item.status}
+	                  data-cache={item.cacheState}
+	                  title={`#${item.index + 1} · ${formatLoadedMediaKind(item.kind)} · ${item.status} · ${item.title}`}
+	                ></span>
+	              {/each}
+	            </span>
+	          </summary>
+	          <div class="status-menu-panel">
+	            <div class="status-panel-section">
+	              <div class="status-panel-heading">
+	                <span>queue</span>
+	                <span>{loadedMediaCacheSummary}</span>
+	              </div>
+	              <div class="status-queue-list" role="list" aria-label="Loaded media queue">
+	                {#each loadedMediaStates as item (item.id)}
+	                  <button
+	                    type="button"
+	                    class="status-queue-item"
+	                    data-current={item.index === currentIndex}
+	                    data-status={item.status}
+	                    data-cache={item.cacheState}
+	                    aria-current={item.index === currentIndex ? 'true' : undefined}
+	                    title={`Jump to ${item.title}`}
+	                    onclick={() => selectPost(item.index)}
+	                  >
+	                    <span class="queue-item-index">{item.index + 1}</span>
+	                    <span
+	                      class="load-chip"
+	                      class:rating-up={item.rating === 1}
+	                      class:rating-down={item.rating === -1}
+	                      class:current={item.index === currentIndex}
+	                      data-kind={item.kind}
+	                      data-status={item.status}
+	                      data-cache={item.cacheState}
+	                    ></span>
+	                    <span class="queue-item-copy">
+	                      <span class="queue-item-title">{item.title}</span>
+	                      <span class="queue-item-meta">
+	                        {formatLoadedMediaKind(item.kind)} · {item.status} · {formatLoadedMediaCacheState(item.cacheState)}
+	                      </span>
+	                    </span>
+	                  </button>
+	                {/each}
+	              </div>
+	            </div>
+
+	            <div class="status-panel-section status-panel-section--auto">
+	              <div class="status-panel-heading">
+	                <span>auto-next</span>
+	                <span>{autoAdvanceSummary}</span>
+	              </div>
+	              <div class="auto-settings-panel auto-settings-panel--inline">
+	                <label class="auto-setting-row">
+	                  <span>image</span>
+	                  <input
+	                    type="number"
+	                    min="1"
+	                    max="30"
+	                    value={imageAdvanceSeconds}
+	                    oninput={handleImageAdvanceInput}
+	                  />
+	                  <span>s</span>
+	                </label>
+	                <label class="auto-setting-row">
+	                  <span>video</span>
+	                  <input
+	                    type="number"
+	                    min="1"
+	                    max="6"
+	                    value={videoAdvancePlays}
+	                    oninput={handleVideoAdvanceInput}
+	                  />
+	                  <span>x</span>
+	                </label>
+	              </div>
+	            </div>
+	          </div>
+	        </details>
+
+	        <button
+	          type="button"
+	          class="auto-dock-toggle"
+	          onclick={toggleAutoAdvance}
+	          title={`${autoAdvanceSummary} · Pause or resume auto-next (${getViewerShortcut('toggle_auto_forward').displayKeys.join(' / ')})`}
+	          aria-label={`${autoAdvanceSummary}. Pause or resume auto-next.`}
+	        >
+	          {#if autoAdvanceSuspended}
+	            paused
+	          {:else if currentMedia.kind === 'video' && !currentVideoTiming?.duration}
+	            wait
+	          {:else}
+	            {formatCountdownReadout(autoAdvanceRemainingMs)}
+	          {/if}
+	        </button>
+	        <span class="auto-advance-title">{autoAdvanceSummary}</span>
+	      </div>
+	    {/if}
+	  </nav>
+
+  {#if viewerUiMode === 'hidden'}
+    <button
+      type="button"
+      class="ui-reveal-button"
+      aria-label="Show viewer UI"
+      onclick={() => setViewerUiMode('mini')}
     >
-      <div class="auto-advance-progress" aria-hidden="true"></div>
-      <button
-        type="button"
-        class="auto-advance-toggle"
-        onclick={toggleAutoAdvance}
-        title={`${autoAdvanceSummary} · Pause or resume auto-next (${getViewerShortcut('toggle_auto_forward').displayKeys.join(' / ')})`}
-        aria-label={`${autoAdvanceSummary}. Pause or resume auto-next.`}
-      >
-        <span class="auto-advance-center-label">
-          {#if autoAdvanceSuspended}
-            paused
-          {:else if currentMedia.kind === 'video' && !currentVideoTiming?.duration}
-            ...
-          {:else}
-            {formatCountdownReadout(autoAdvanceRemainingMs)}
-          {/if}
-        </span>
-      </button>
-    </div>
-
-    <div
-      class="auto-advance-dock"
-      role="group"
-      aria-label="Auto advance controls"
-      data-paused={autoAdvanceSuspended}
-      onpointerenter={engageViewerUi}
-      onpointerleave={releaseViewerUiSoon}
-      onfocusin={engageViewerUi}
-      onfocusout={handleViewerSurfaceFocusOut}
-    >
-      <span class="auto-advance-title">{autoAdvanceSummary}</span>
-      <details class="auto-settings">
-        <summary>{imageAdvanceSeconds}s / {videoAdvancePlays}x</summary>
-        <div class="auto-settings-panel">
-          <label class="auto-setting-row">
-            <span>image</span>
-            <input
-              type="number"
-              min="1"
-              max="30"
-              value={imageAdvanceSeconds}
-              oninput={handleImageAdvanceInput}
-            />
-            <span>s</span>
-          </label>
-          <label class="auto-setting-row">
-            <span>video</span>
-            <input
-              type="number"
-              min="1"
-              max="6"
-              value={videoAdvancePlays}
-              oninput={handleVideoAdvanceInput}
-            />
-            <span>x</span>
-          </label>
-          <p class="auto-setting-note">video waits for the configured plays, never less than 5s</p>
-        </div>
-      </details>
-    </div>
+      ui
+    </button>
   {/if}
 
-  {#if dev}
+	  {#if dev}
     <details
       bind:open={debugExpanded}
       class="debug-dock"
@@ -1839,20 +2109,19 @@
 
   .topbar {
     position: absolute;
-    inset: 10px 10px auto;
-    z-index: 30;
+    inset: 10px auto auto 10px;
+    z-index: 36;
     display: flex;
     width: fit-content;
-    max-width: calc(100vw - 20px);
+    max-width: min(760px, calc(100vw - 20px));
     align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    padding: 8px 10px;
-    border-radius: 18px;
-    background: rgba(8, 11, 15, 0.28);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    backdrop-filter: blur(18px) saturate(0.95);
-    box-shadow: 0 14px 32px rgba(0, 0, 0, 0.16);
+    gap: 6px;
+    padding: 6px;
+    border-radius: 16px;
+    background: rgba(8, 11, 15, 0.54);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(20px) saturate(1.05);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.22);
     transition:
       background 220ms ease,
       border-color 220ms ease,
@@ -1866,14 +2135,14 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 6px 10px;
-    border-radius: 999px;
+    min-height: 28px;
+    padding: 5px 9px;
+    border-radius: 11px;
     border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(9, 12, 16, 0.2);
+    background: rgba(255, 255, 255, 0.06);
     backdrop-filter: blur(10px);
     font-weight: 700;
-    font-size: 0.88rem;
-    letter-spacing: 0.04em;
+    font-size: 0.78rem;
     color: rgba(198, 226, 246, 0.88);
     white-space: nowrap;
     transition:
@@ -1884,13 +2153,89 @@
       transform 220ms ease;
   }
 
+  .route-chip,
+  .mode-chip,
+  .ui-mode-chip,
+  .topbar-menu summary,
+  .ui-reveal-button {
+    display: inline-flex;
+    min-height: 28px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 11px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.045);
+    color: rgba(229, 241, 250, 0.86);
+    font-size: 0.72rem;
+    line-height: 1;
+  }
+
+  .route-chip {
+    max-width: clamp(130px, 24vw, 320px);
+    justify-content: flex-start;
+    overflow: hidden;
+    padding: 0 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mode-chip {
+    padding: 0 9px;
+    color: rgba(165, 210, 240, 0.92);
+  }
+
+  .ui-mode-chip {
+    padding: 0 8px;
+    color: rgba(195, 206, 216, 0.78);
+  }
+
+  .topbar-menu {
+    position: static;
+  }
+
+  .topbar-menu summary {
+    list-style: none;
+    padding: 0 9px;
+    cursor: pointer;
+    transition:
+      background 180ms ease,
+      border-color 180ms ease,
+      color 180ms ease;
+  }
+
+  .topbar-menu summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .topbar-menu[open] summary,
+  .topbar-menu summary:hover,
+  .topbar-menu summary:focus-visible {
+    background: rgba(140, 199, 239, 0.14);
+    border-color: rgba(140, 199, 239, 0.24);
+    color: #edf6ff;
+  }
+
+  .topbar-menu-panel {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    width: min(480px, calc(100vw - 20px));
+    display: grid;
+    gap: 10px;
+    padding: 10px;
+    border-radius: 16px;
+    background: rgba(8, 11, 15, 0.86);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(22px) saturate(1.08);
+    box-shadow: 0 24px 58px rgba(0, 0, 0, 0.36);
+  }
+
   .path-form {
     display: flex;
-    gap: 4px;
-    flex: 1 1 220px;
-    max-width: 260px;
+    gap: 6px;
+    width: 100%;
     min-width: 0;
-    overflow: hidden;
+    overflow: visible;
     transition:
       opacity 220ms ease,
       max-width 220ms ease,
@@ -1899,17 +2244,19 @@
   }
 
   .path-input {
-    background: rgba(10, 14, 19, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.09);
+    min-width: 0;
+    background: rgba(6, 9, 13, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     color: #e0e0e0;
     padding: 7px 9px;
     border-radius: 10px;
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     flex: 1;
   }
 
   .path-form button,
   .display-chip,
+  .ui-chip,
   .selection-action {
     border: 1px solid rgba(255, 255, 255, 0.08);
     color: rgba(229, 241, 250, 0.9);
@@ -1927,24 +2274,36 @@
   .path-form button {
     padding: 7px 10px;
     border-radius: 10px;
-    font-size: 0.8rem;
+    font-size: 0.76rem;
   }
 
   .path-form button:hover,
   .display-chip:hover,
+  .ui-chip:hover,
   .selection-action:hover {
     background: rgba(255, 255, 255, 0.11);
     border-color: rgba(255, 255, 255, 0.12);
     color: #edf6ff;
   }
 
+  .menu-section {
+    display: grid;
+    gap: 6px;
+  }
+
+  .menu-label {
+    color: rgba(166, 178, 190, 0.82);
+    font-size: 0.62rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+  }
+
   .nav-links {
     display: flex;
-    gap: 10px;
-    font-size: 0.76rem;
+    gap: 6px;
     flex-wrap: wrap;
     min-width: 0;
-    overflow: hidden;
+    overflow: visible;
     transition:
       opacity 220ms ease,
       max-width 220ms ease,
@@ -1953,21 +2312,29 @@
   }
 
   .nav-links a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 0 9px;
+    border-radius: 10px;
     color: #b0b7c4;
+    font-size: 0.72rem;
+    background: rgba(255, 255, 255, 0.035);
   }
 
   .nav-links a:hover {
+    background: rgba(255, 255, 255, 0.08);
     color: #edf6ff;
   }
 
-  .display-switcher {
+  .display-switcher,
+  .ui-switcher {
     display: flex;
     gap: 6px;
     align-items: center;
     flex-wrap: wrap;
-    margin-left: auto;
     min-width: 0;
-    overflow: hidden;
+    overflow: visible;
     transition:
       opacity 220ms ease,
       max-width 220ms ease,
@@ -1975,46 +2342,45 @@
       filter 220ms ease;
   }
 
-  .topbar .path-form,
-  .topbar .nav-links,
-  .topbar .display-switcher {
-    width: auto !important;
-    max-width: none !important;
-    opacity: 1 !important;
-    transform: none !important;
-    filter: none !important;
-    pointer-events: auto !important;
-    overflow: visible !important;
-  }
-
-  .display-chip {
-    padding: 6px 10px;
-    border-radius: 999px;
+  .display-chip,
+  .ui-chip {
+    min-height: 28px;
+    padding: 0 9px;
+    border-radius: 10px;
     font-size: 0.74rem;
     text-transform: lowercase;
-    letter-spacing: 0.04em;
     opacity: 0.74;
   }
 
-  .topbar .path-form {
-    flex: 1 1 260px !important;
-    min-width: min(260px, 42vw) !important;
-  }
-
-  .topbar .nav-links {
-    flex: 0 1 auto !important;
-  }
-
-  .topbar .display-switcher {
-    flex: 0 1 auto !important;
-  }
-
-  .display-chip.active {
+  .display-chip.active,
+  .ui-chip.active {
     opacity: 1;
     transform: translateY(-1px);
     background: rgba(140, 199, 239, 0.16);
     border-color: rgba(140, 199, 239, 0.24);
     box-shadow: 0 10px 22px rgba(14, 20, 26, 0.14);
+  }
+
+  .ui-reveal-button {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 42;
+    width: 34px;
+    min-height: 32px;
+    padding: 0;
+    background: rgba(8, 11, 15, 0.48);
+    backdrop-filter: blur(18px) saturate(1.05);
+    color: rgba(221, 236, 246, 0.82);
+    cursor: pointer;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+  }
+
+  .ui-reveal-button:hover,
+  .ui-reveal-button:focus-visible {
+    background: rgba(140, 199, 239, 0.18);
+    border-color: rgba(140, 199, 239, 0.28);
+    color: #edf6ff;
   }
 
   .debug-dock {
@@ -2639,140 +3005,6 @@
     z-index: 1;
   }
 
-  .auto-advance-hud {
-    --auto-advance-progress: 0;
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    z-index: 26;
-    width: clamp(92px, 9vw, 116px);
-    aspect-ratio: 1;
-    border-radius: 50%;
-    transform: translate(-50%, calc(-50% + clamp(46px, 9vh, 96px)));
-    pointer-events: none;
-    opacity: 0.16;
-    transition:
-      opacity 180ms ease,
-      transform 180ms ease;
-  }
-
-  .auto-advance-hud::before {
-    content: '';
-    position: absolute;
-    inset: 6px;
-    border-radius: inherit;
-    background: rgba(7, 10, 14, 0.1);
-    border: 1px solid rgba(255, 255, 255, 0.04);
-    backdrop-filter: blur(22px) saturate(0.9);
-    box-shadow:
-      0 18px 46px rgba(0, 0, 0, 0.1),
-      inset 0 1px 0 rgba(255, 255, 255, 0.03);
-  }
-
-  .auto-advance-hud:hover,
-  .auto-advance-hud:focus-within {
-    opacity: 0.62;
-    transform: translate(-50%, calc(-50% + clamp(46px, 9vh, 96px))) scale(1.015);
-  }
-
-  .auto-advance-hud[data-paused='true'] {
-    opacity: 0.1;
-  }
-
-  .auto-advance-progress {
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background:
-      conic-gradient(
-        from -90deg,
-        rgba(164, 209, 238, 0.28) 0turn calc(var(--auto-advance-progress) * 1turn),
-        rgba(255, 255, 255, 0.045) calc(var(--auto-advance-progress) * 1turn) 1turn
-      );
-    -webkit-mask: radial-gradient(
-      farthest-side,
-      transparent calc(100% - 8px),
-      #000 calc(100% - 7px)
-    );
-    mask: radial-gradient(
-      farthest-side,
-      transparent calc(100% - 8px),
-      #000 calc(100% - 7px)
-    );
-    filter: blur(0.6px);
-  }
-
-  .auto-advance-hud[data-paused='true'] .auto-advance-progress {
-    background: conic-gradient(from -90deg, rgba(255, 255, 255, 0.08) 0turn 1turn);
-  }
-
-  .auto-advance-toggle {
-    position: absolute;
-    inset: 12px;
-    z-index: 1;
-    display: grid;
-    place-content: center;
-    gap: 0;
-    padding: 0;
-    border: none;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.018);
-    color: rgba(237, 246, 255, 0.86);
-    text-align: center;
-    cursor: pointer;
-    pointer-events: auto;
-    transition:
-      background 180ms ease,
-      color 180ms ease;
-  }
-
-  .auto-advance-toggle:hover {
-    background: rgba(255, 255, 255, 0.04);
-    color: rgba(237, 246, 255, 0.96);
-  }
-
-  .auto-advance-toggle:focus-visible,
-  .auto-settings summary:focus-visible {
-    outline: 2px solid rgba(140, 199, 239, 0.32);
-    outline-offset: 2px;
-  }
-
-  .auto-advance-center-label {
-    color: currentColor;
-    font-size: 0.86rem;
-    letter-spacing: 0.02em;
-    font-variant-numeric: tabular-nums;
-    text-shadow: 0 1px 12px rgba(0, 0, 0, 0.12);
-  }
-
-  .auto-advance-dock {
-    position: absolute;
-    right: 10px;
-    bottom: 10px;
-    z-index: 26;
-    display: grid;
-    justify-items: end;
-    gap: 8px;
-    max-width: min(320px, calc(100vw - 20px));
-    padding: 8px 10px;
-    border-radius: 16px;
-    background: rgba(8, 10, 14, 0.24);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    backdrop-filter: blur(16px) saturate(0.92);
-    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.12);
-    transition:
-      opacity 220ms ease,
-      background 220ms ease,
-      border-color 220ms ease,
-      box-shadow 220ms ease,
-      backdrop-filter 220ms ease,
-      transform 220ms ease;
-  }
-
-  .auto-advance-dock[data-paused='true'] {
-    background: rgba(8, 10, 14, 0.42);
-  }
-
   .auto-advance-title {
     color: rgba(237, 246, 255, 0.82);
     font-size: 0.72rem;
@@ -2786,32 +3018,6 @@
       max-height 220ms ease,
       transform 220ms ease,
       filter 220ms ease;
-  }
-
-  .auto-settings {
-    position: relative;
-  }
-
-  .auto-settings summary {
-    list-style: none;
-    cursor: pointer;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(255, 255, 255, 0.04);
-    color: rgba(215, 227, 239, 0.88);
-    border-radius: 999px;
-    padding: 6px 10px;
-    font-size: 0.72rem;
-    text-transform: lowercase;
-    transition:
-      opacity 220ms ease,
-      background 180ms ease,
-      border-color 180ms ease,
-      color 180ms ease,
-      transform 180ms ease;
-  }
-
-  .auto-settings summary::-webkit-details-marker {
-    display: none;
   }
 
   .auto-settings-panel {
@@ -2847,10 +3053,96 @@
     font-size: 0.74rem;
   }
 
-  .auto-setting-note {
-    font-size: 0.68rem;
-    color: #9eb0c1;
-    line-height: 1.35;
+  .auto-dock-toggle {
+    min-width: 48px;
+    min-height: 30px;
+    padding: 0 9px;
+    border-radius: 11px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.055);
+    color: rgba(237, 246, 255, 0.9);
+    font-size: 0.74rem;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
+
+  .auto-dock-toggle:hover,
+  .auto-dock-toggle:focus-visible {
+    background: rgba(140, 199, 239, 0.16);
+    border-color: rgba(140, 199, 239, 0.24);
+    color: #edf6ff;
+  }
+
+  .auto-advance-title {
+    min-width: 0;
+    flex: 1;
+    font-size: 0.72rem;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .topbar {
+    max-width: calc(100vw - 20px);
+    padding: 5px;
+    opacity: 0.88;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .route-chip {
+    max-width: min(168px, 34vw);
+  }
+
+  .viewer-page[data-ui-mode='mini'] .ui-mode-chip {
+    display: none;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .selection-card {
+    width: min(250px, calc(100vw - 20px));
+    gap: 4px;
+    padding: 8px;
+    opacity: 0.84;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .selection-meta,
+  .viewer-page[data-ui-mode='mini'] .selection-actions {
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(4px);
+    pointer-events: none;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .selection-card:hover .selection-meta,
+  .viewer-page[data-ui-mode='mini'] .selection-card:focus-within .selection-meta,
+  .viewer-page[data-ui-mode='mini'] .selection-card:hover .selection-actions,
+  .viewer-page[data-ui-mode='mini'] .selection-card:focus-within .selection-actions {
+    max-height: 48px;
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .selection-title {
+    font-size: 0.78rem;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+    max-height: 24px;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .selection-card:hover .selection-title,
+  .viewer-page[data-ui-mode='mini'] .selection-card:focus-within .selection-title {
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    max-height: 48px;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .auto-advance-title {
+    max-width: 98px;
+  }
+
+  .viewer-page[data-ui-mode='hidden'] .topbar,
+  .viewer-page[data-ui-mode='hidden'] .selection-card,
+  .viewer-page[data-ui-mode='hidden'] .debug-dock,
+  .viewer-page[data-ui-mode='hidden'] .feed-loading-indicator {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-6px);
   }
 
   .feed-loading-indicator {
@@ -2985,30 +3277,8 @@
       display: none;
     }
 
-    .auto-advance-hud {
-      width: clamp(84px, 22vw, 102px);
-      transform: translate(-50%, calc(-50% + clamp(34px, 11vh, 72px)));
-    }
-
-    .auto-advance-hud:hover,
-    .auto-advance-hud:focus-within {
-      transform: translate(-50%, calc(-50% + clamp(34px, 11vh, 72px))) scale(1.015);
-    }
-
-    .auto-advance-dock {
-      left: 8px;
-      right: 8px;
-      bottom: 8px;
-      max-width: none;
-      justify-items: stretch;
-    }
-
     .auto-advance-title {
       white-space: normal;
-    }
-
-    .auto-settings {
-      justify-self: end;
     }
 
     .feed-loading-indicator {
@@ -3021,8 +3291,7 @@
     .display-chip,
     .masonry-tile,
     .wild-card,
-    .auto-advance-hud,
-    .auto-advance-toggle {
+    .auto-dock-toggle {
       transition: none;
     }
 
@@ -3032,6 +3301,475 @@
 
     .scroll-feed {
       scroll-behavior: auto;
+    }
+  }
+
+  .viewer-page[data-ui-mode='hidden'] .debug-dock,
+  .viewer-page[data-ui-mode='hidden'] .debug-dock:not([open]):not(.has-error):not(:hover):not(:focus-within) {
+    opacity: 0 !important;
+    pointer-events: none !important;
+    transform: translateY(-6px) !important;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .debug-dock:not([open]):not(.has-error) {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  @media (max-width: 720px) {
+    .viewer-page[data-ui-mode='mini'] .topbar {
+      inset: 8px auto auto 8px;
+      max-width: calc(100vw - 16px);
+      gap: 4px;
+      padding: 5px;
+    }
+
+    .viewer-page[data-ui-mode='mini'] .logo {
+      width: 34px;
+      padding: 0;
+      font-size: 0;
+    }
+
+    .viewer-page[data-ui-mode='mini'] .logo::after {
+      content: 'SG';
+      font-size: 0.76rem;
+    }
+
+    .viewer-page[data-ui-mode='mini'] .route-chip {
+      max-width: 112px;
+    }
+
+    .viewer-page[data-ui-mode='mini'] .mode-chip,
+    .viewer-page[data-ui-mode='mini'] .topbar-menu summary {
+      padding-inline: 8px;
+    }
+
+    .viewer-page[data-ui-mode='mini'] .topbar-menu-panel {
+      width: min(360px, calc(100vw - 16px));
+    }
+
+    .viewer-page[data-ui-mode='mini'] .auto-dock-toggle {
+      min-width: 42px;
+      padding-inline: 7px;
+    }
+
+    .viewer-page[data-ui-mode='mini'] .auto-advance-title {
+      max-width: 72px;
+    }
+  }
+
+  .topbar {
+    inset: 0 0 auto 0;
+    width: 100%;
+    max-width: none;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 0;
+    padding: 0;
+    border-width: 0 0 1px;
+    border-radius: 0;
+    background: rgba(8, 11, 15, 0.62);
+  }
+
+  .topbar-nav,
+  .viewer-status {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 4px;
+    padding: 4px 6px;
+  }
+
+  .topbar-nav {
+    flex: 1 1 auto;
+  }
+
+  .viewer-status {
+    --auto-advance-progress: 0;
+    position: relative;
+    flex: 0 1 auto;
+    justify-content: flex-end;
+    max-width: min(62vw, 760px);
+    border-left: 1px solid rgba(255, 255, 255, 0.07);
+    overflow: visible;
+  }
+
+  .status-progress {
+    position: absolute;
+    inset: auto 0 0;
+    height: 2px;
+    background:
+      linear-gradient(
+        90deg,
+        rgba(164, 209, 238, 0.76) 0% calc(var(--auto-advance-progress) * 100%),
+        rgba(255, 255, 255, 0.1) calc(var(--auto-advance-progress) * 100%) 100%
+      );
+  }
+
+  .status-count,
+  .status-subreddit,
+  .status-menu summary,
+  .status-label,
+  .load-summary,
+  .auto-dock-toggle,
+  .auto-advance-title {
+    display: inline-flex;
+    min-height: 28px;
+    align-items: center;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    color: rgba(229, 241, 250, 0.86);
+    font-size: 0.72rem;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .status-count,
+  .status-subreddit,
+  .status-label,
+  .load-summary,
+  .auto-advance-title {
+    padding: 0 8px;
+  }
+
+  .status-count,
+  .load-summary,
+  .auto-dock-toggle {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .status-subreddit {
+    color: rgba(154, 211, 247, 0.92);
+  }
+
+  .status-menu {
+    position: static;
+  }
+
+  .status-menu summary {
+    list-style: none;
+    gap: 6px;
+    padding: 0 8px;
+    cursor: pointer;
+  }
+
+  .status-menu summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .status-menu[open] summary,
+  .status-menu summary:hover,
+  .status-menu summary:focus-visible {
+    background: rgba(140, 199, 239, 0.14);
+    border-color: rgba(140, 199, 239, 0.24);
+    color: #edf6ff;
+  }
+
+  .load-rail {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .load-chip {
+    position: relative;
+    display: inline-flex;
+    width: 8px;
+    height: 16px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.18);
+    overflow: hidden;
+    transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
+  }
+
+  .load-chip[data-kind='gallery'] {
+    width: 12px;
+    border-radius: 4px;
+  }
+
+  .load-chip.current {
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
+  }
+
+  .load-chip[data-status='queued'] {
+    background: rgba(255, 255, 255, 0.16);
+  }
+
+  .load-chip[data-status='seen'] {
+    background: rgba(255, 255, 255, 0.34);
+  }
+
+  .load-chip[data-status='loading'] {
+    background: rgba(214, 176, 103, 0.68);
+    animation: loading-pulse 1.4s ease-in-out infinite;
+  }
+
+  .load-chip[data-status='ready'] {
+    background: rgba(106, 176, 222, 0.82);
+  }
+
+  .load-chip[data-status='error'] {
+    background: rgba(190, 101, 101, 0.82);
+  }
+
+  .load-chip[data-cache='cached'] {
+    box-shadow: 0 0 0 1px rgba(113, 212, 136, 0.78);
+  }
+
+  .load-chip[data-cache='live'],
+  .load-chip[data-cache='checking'] {
+    opacity: 0.78;
+  }
+
+  .load-chip[data-cache='inactive'],
+  .load-chip[data-cache='unsupported'],
+  .load-chip[data-cache='skipped'] {
+    opacity: 0.52;
+  }
+
+  .load-chip::after {
+    content: '';
+    position: absolute;
+    inset: auto 0 0;
+    height: 3px;
+    background: transparent;
+  }
+
+  .load-chip.rating-up::after {
+    background: #71d488;
+  }
+
+  .load-chip.rating-down::after {
+    background: #de7e7e;
+  }
+
+  .status-menu-panel {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    width: min(560px, 100vw);
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(180px, 0.75fr);
+    gap: 10px;
+    padding: 10px;
+    border-radius: 0 0 0 16px;
+    background: rgba(8, 11, 15, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 0;
+    backdrop-filter: blur(22px) saturate(1.08);
+    box-shadow: 0 24px 58px rgba(0, 0, 0, 0.36);
+  }
+
+  .status-panel-section {
+    min-width: 0;
+    display: grid;
+    gap: 8px;
+  }
+
+  .status-panel-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: rgba(166, 178, 190, 0.86);
+    font-size: 0.64rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .status-queue-list {
+    display: grid;
+    gap: 5px;
+    max-height: min(48vh, 330px);
+    overflow: auto;
+    padding-right: 2px;
+  }
+
+  .status-queue-item {
+    display: grid;
+    grid-template-columns: 2.5ch auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 7px 8px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.04);
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .status-queue-item:hover,
+  .status-queue-item:focus-visible,
+  .status-queue-item[data-current='true'] {
+    background: rgba(106, 176, 222, 0.13);
+    border-color: rgba(106, 176, 222, 0.28);
+  }
+
+  .queue-item-index {
+    color: #9fb0be;
+    font-size: 0.7rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .queue-item-copy {
+    min-width: 0;
+    display: grid;
+    gap: 3px;
+  }
+
+  .queue-item-title,
+  .queue-item-meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .queue-item-title {
+    color: #edf5fc;
+    font-size: 0.74rem;
+  }
+
+  .queue-item-meta {
+    color: #9fb0be;
+    font-size: 0.66rem;
+  }
+
+  .auto-settings-panel--inline {
+    position: static;
+    width: auto;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .auto-dock-toggle {
+    min-width: 48px;
+    justify-content: center;
+    padding: 0 8px;
+  }
+
+  .auto-advance-title {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ui-reveal-button {
+    top: 0;
+    left: 0;
+    border-radius: 0 0 10px 0;
+  }
+
+  .debug-dock {
+    top: 37px;
+    right: 0;
+    border-radius: 0 0 0 16px;
+  }
+
+  .selection-card {
+    left: 0;
+    bottom: 0;
+    border-radius: 0 16px 0 0;
+  }
+
+  .feed-loading-indicator {
+    right: 0;
+    bottom: 0;
+    border-radius: 16px 0 0 0;
+  }
+
+  .viewer-page[data-ui-mode='hidden'] .topbar,
+  .viewer-page[data-ui-mode='hidden'] .viewer-status,
+  .viewer-page[data-ui-mode='hidden'] .selection-card,
+  .viewer-page[data-ui-mode='hidden'] .feed-loading-indicator {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-6px);
+  }
+
+  .viewer-page[data-ui-mode='mini'] .topbar {
+    inset: 0 0 auto 0;
+    width: 100%;
+    max-width: none;
+    padding: 0;
+    opacity: 0.92;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .viewer-status {
+    max-width: min(54vw, 560px);
+  }
+
+  .viewer-page[data-ui-mode='mini'] .status-subreddit,
+  .viewer-page[data-ui-mode='mini'] .status-label,
+  .viewer-page[data-ui-mode='mini'] .auto-advance-title {
+    display: none;
+  }
+
+  @media (max-width: 760px) {
+    .topbar {
+      flex-wrap: wrap;
+    }
+
+    .topbar-nav,
+    .viewer-status {
+      flex: 1 1 100%;
+      padding: 4px;
+    }
+
+    .viewer-status {
+      max-width: none;
+      justify-content: space-between;
+      border-left: 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .logo {
+      width: 34px;
+      padding: 0;
+      font-size: 0;
+    }
+
+    .logo::after {
+      content: 'SG';
+      font-size: 0.76rem;
+    }
+
+    .route-chip {
+      max-width: 128px;
+    }
+
+    .ui-mode-chip,
+    .status-subreddit,
+    .status-label,
+    .auto-advance-title {
+      display: none;
+    }
+
+    .status-menu summary {
+      max-width: 136px;
+      overflow: hidden;
+    }
+
+    .status-menu-panel {
+      left: 0;
+      right: auto;
+      width: 100vw;
+      grid-template-columns: 1fr;
+      border-radius: 0 0 14px 14px;
+    }
+
+    .debug-dock {
+      top: 74px;
+    }
+
+    .selection-card {
+      width: min(260px, 58vw);
     }
   }
 </style>

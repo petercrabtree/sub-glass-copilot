@@ -9,6 +9,7 @@
     onevent,
     onstatechange,
     ontimingchange,
+    onvideoended,
   }: {
     media: MediaGroup;
     itemIndex?: number;
@@ -21,6 +22,7 @@
       postId: string;
       itemIndex: number;
     }) => void;
+    onvideoended?: () => void;
     ontimingchange?: (detail: {
       currentTime: number;
       duration: number;
@@ -77,6 +79,10 @@
     onevent?.({ type: 'video_pause', mediaId: media.id, postId: media.postId });
   }
 
+  function onVideoEnded() {
+    onvideoended?.();
+  }
+
   function emitStateChange(state: 'loading' | 'ready' | 'error') {
     onstatechange?.({ state, mediaId: media.id, postId: media.postId, itemIndex });
   }
@@ -131,6 +137,7 @@
         class="media-video"
         onplay={onVideoPlay}
         onpause={onVideoPause}
+        onended={onVideoEnded}
         onloadedmetadata={() => {
           emitTimingChange(videoEl?.currentTime ?? 0, videoEl?.duration ?? 0, videoEl?.paused ?? false);
         }}
