@@ -28,6 +28,7 @@
   import PostOverlay from '$lib/components/PostOverlay.svelte';
   import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
   import {
+    VIEWER_SHORTCUT_GROUPS,
     getViewerActionForKey,
     getViewerShortcut,
     type ViewerShortcutAction,
@@ -1335,6 +1336,16 @@
     }
   }
 
+  async function rateUpAndAdvance() {
+    await rateUp();
+    await advance();
+  }
+
+  async function rateDownAndAdvance() {
+    await rateDown();
+    await advance();
+  }
+
   async function openReddit() {
     if (!currentPost) return;
     window.open(`https://reddit.com${currentPost.permalink}`, '_blank');
@@ -1472,9 +1483,12 @@
     const action = getViewerActionForKey(event.key);
     if (!action) return;
 
-    if (getViewerShortcut(action).preventDefault) {
+    const shortcut = getViewerShortcut(action);
+    if (shortcut.preventDefault) {
       event.preventDefault();
     }
+
+    if (event.repeat && (action === 'rate_up_next' || action === 'rate_down_next')) return;
 
     switch (action) {
       case 'skip_forward':
@@ -1495,11 +1509,11 @@
       case 'open_media':
         void openMedia();
         break;
-      case 'rate_up':
-        void rateUp();
+      case 'rate_up_next':
+        void rateUpAndAdvance();
         break;
-      case 'rate_down':
-        void rateDown();
+      case 'rate_down_next':
+        void rateDownAndAdvance();
         break;
       case 'toggle_auto_forward':
         toggleAutoAdvance();
@@ -1982,6 +1996,23 @@
 	                >
 	                  <span>{mode.label}</span>
 	                </button>
+	              {/each}
+	            </div>
+	          </div>
+
+	          <div class="menu-section">
+	            <span class="menu-label">keys</span>
+	            <div class="shortcut-grid" aria-label="Keyboard shortcuts">
+	              {#each VIEWER_SHORTCUT_GROUPS as group}
+	                <div class="shortcut-group">
+	                  <span class="shortcut-group-title">{group.title}</span>
+	                  {#each group.shortcuts as shortcut}
+	                    <div class="shortcut-row">
+	                      <span>{shortcut.description}</span>
+	                      <kbd>{shortcut.displayKeys.join(' / ')}</kbd>
+	                    </div>
+	                  {/each}
+	                </div>
 	              {/each}
 	            </div>
 	          </div>
@@ -2623,6 +2654,39 @@
     font-size: 0.62rem;
     letter-spacing: 0.11em;
     text-transform: uppercase;
+  }
+
+  .shortcut-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 8px;
+  }
+
+  .shortcut-group {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .shortcut-group-title {
+    color: rgba(166, 178, 190, 0.82);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+  }
+
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    color: rgba(215, 224, 232, 0.88);
+    font-size: 0.72rem;
+  }
+
+  .shortcut-row kbd {
+    font: 0.68rem ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: #9bd2f6;
+    white-space: nowrap;
   }
 
   .nav-links {

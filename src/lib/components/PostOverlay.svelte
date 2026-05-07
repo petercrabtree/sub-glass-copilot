@@ -94,8 +94,8 @@
   const skipForwardShortcut = formatViewerShortcutKeys('skip_forward');
   const redditShortcut = formatViewerShortcutKeys('open_reddit');
   const mediaShortcut = formatViewerShortcutKeys('open_media');
-  const rateUpShortcut = formatViewerShortcutKeys('rate_up');
-  const rateDownShortcut = formatViewerShortcutKeys('rate_down');
+  const rateUpShortcut = formatViewerShortcutKeys('rate_up_next');
+  const rateDownShortcut = formatViewerShortcutKeys('rate_down_next');
   const canMoveGalleryBack = $derived(totalMedia > 1 && mediaIndex > 0);
   const canMoveGalleryForward = $derived(totalMedia > 1 && mediaIndex < totalMedia - 1);
   const cacheableLoadedMediaCount = $derived(
@@ -424,14 +424,14 @@
         class="btn-icon"
         class:active={rating === 1}
         onclick={() => onrateUp?.()}
-        title={`Thumbs up (${rateUpShortcut})`}
+        title={`Thumbs up (${rateUpShortcut} rates and advances)`}
         aria-label="Rate up"
       >👍</button>
       <button
         class="btn-icon"
         class:active={rating === -1}
         onclick={() => onrateDown?.()}
-        title={`Thumbs down (${rateDownShortcut})`}
+        title={`Thumbs down (${rateDownShortcut} rates and advances)`}
         aria-label="Rate down"
       >👎</button>
       <button

@@ -5,8 +5,8 @@ export type ViewerShortcutAction =
   | 'step_forward'
   | 'open_reddit'
   | 'open_media'
-  | 'rate_up'
-  | 'rate_down'
+  | 'rate_up_next'
+  | 'rate_down_next'
   | 'toggle_auto_forward'
   | 'display_fill'
   | 'display_scroll'
@@ -29,16 +29,16 @@ const VIEWER_SHORTCUTS: readonly ViewerShortcut[] = [
     action: 'skip_backward',
     group: 'Navigate',
     description: 'Previous post',
-    displayKeys: ['\u2190', 'H'],
-    matchKeys: ['ArrowLeft', 'h'],
+    displayKeys: ['\u2190', 'H', 'A'],
+    matchKeys: ['ArrowLeft', 'h', 'a'],
     preventDefault: true,
   },
   {
     action: 'skip_forward',
     group: 'Navigate',
     description: 'Next post',
-    displayKeys: ['\u2192', 'L'],
-    matchKeys: ['ArrowRight', 'l'],
+    displayKeys: ['\u2192', 'L', 'D'],
+    matchKeys: ['ArrowRight', 'l', 'd'],
     preventDefault: true,
   },
   {
@@ -72,18 +72,20 @@ const VIEWER_SHORTCUTS: readonly ViewerShortcut[] = [
     matchKeys: ['o'],
   },
   {
-    action: 'rate_up',
+    action: 'rate_up_next',
     group: 'Actions',
-    description: 'Rate up',
-    displayKeys: ['W', 'U'],
-    matchKeys: ['w', 'u'],
+    description: 'Rate up and next',
+    displayKeys: ['W'],
+    matchKeys: ['w'],
+    preventDefault: true,
   },
   {
-    action: 'rate_down',
+    action: 'rate_down_next',
     group: 'Actions',
-    description: 'Rate down',
-    displayKeys: ['S', 'D'],
-    matchKeys: ['s', 'd'],
+    description: 'Rate down and next',
+    displayKeys: ['S'],
+    matchKeys: ['s'],
+    preventDefault: true,
   },
   {
     action: 'toggle_auto_forward',
