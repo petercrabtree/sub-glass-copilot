@@ -1,6 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type {
-  SubredditRecord, AdjacencyLink, PostRecord, MediaGroup, SignalEvent, CacheEntry
+  SubredditRecord, AdjacencyLink, PostRecord, MediaGroup, SignalEvent, CacheEntry, FeedSnapshot
 } from '$lib/types';
 
 interface SubGlassDB extends DBSchema {
@@ -32,52 +32,101 @@ interface SubGlassDB extends DBSchema {
     key: string;
     value: CacheEntry;
   };
+  feedSnapshots: {
+    key: string;
+    value: FeedSnapshot;
+    indexes: { 'by-updated': number };
+  };
 }
 
 let _db: IDBPDatabase<SubGlassDB> | null = null;
 
 export async function getDB(): Promise<IDBPDatabase<SubGlassDB>> {
   if (_db) return _db;
-  _db = await openDB<SubGlassDB>('subglass', 1, {
+  _db = await openDB<SubGlassDB>('subglass', 2, {
     upgrade(db) {
-      db.createObjectStore('subreddits', { keyPath: 'name' });
+      if (!db.objectStoreNames.contains('subreddits')) {
+        db.createObjectStore('subreddits', { keyPath: 'name' });
+      }
 
-      const adjStore = db.createObjectStore('adjacency', { keyPath: ['fromSubreddit', 'toSubreddit', 'source'] });
-      adjStore.createIndex('by-from', 'fromSubreddit');
+      if (!db.objectStoreNames.contains('adjacency')) {
+        const adjStore = db.createObjectStore('adjacency', { keyPath: ['fromSubreddit', 'toSubreddit', 'source'] });
+        adjStore.createIndex('by-from', 'fromSubreddit');
+      }
 
-      const postStore = db.createObjectStore('posts', { keyPath: 'id' });
-      postStore.createIndex('by-subreddit', 'subreddit');
-      postStore.createIndex('by-seen', 'seenAt');
+      if (!db.objectStoreNames.contains('posts')) {
+        const postStore = db.createObjectStore('posts', { keyPath: 'id' });
+        postStore.createIndex('by-subreddit', 'subreddit');
+        postStore.createIndex('by-seen', 'seenAt');
+      }
 
-      const mediaStore = db.createObjectStore('media', { keyPath: 'id' });
-      mediaStore.createIndex('by-post', 'postId');
+      if (!db.objectStoreNames.contains('media')) {
+        const mediaStore = db.createObjectStore('media', { keyPath: 'id' });
+        mediaStore.createIndex('by-post', 'postId');
+      }
 
-      const eventStore = db.createObjectStore('events', { keyPath: 'id' });
-      eventStore.createIndex('by-type', 'type');
-      eventStore.createIndex('by-ts', 'ts');
+      if (!db.objectStoreNames.contains('events')) {
+        const eventStore = db.createObjectStore('events', { keyPath: 'id' });
+        eventStore.createIndex('by-type', 'type');
+        eventStore.createIndex('by-ts', 'ts');
+      }
 
-      db.createObjectStore('cache', { keyPath: 'specKey' });
+      if (!db.objectStoreNames.contains('cache')) {
+        db.createObjectStore('cache', { keyPath: 'specKey' });
+      }
+
+      if (!db.objectStoreNames.contains('feedSnapshots')) {
+        const snapshotStore = db.createObjectStore('feedSnapshots', { keyPath: 'routeKey' });
+        snapshotStore.createIndex('by-updated', 'updatedAt');
+      }
     },
   });
   return _db;
 }
 
+function normalizeSubredditName(name: string): string {
+  return name.trim().replace(/^\/?r\//i, '').toLowerCase();
+}
+
 // Subreddits
 export async function upsertSubreddit(sub: SubredditRecord): Promise<void> {
   const db = await getDB();
-  const existing = await db.get('subreddits', sub.name);
+  const normalizedName = normalizeSubredditName(sub.name);
+  const existing = await db.get('subreddits', normalizedName);
+  const normalizedSub: SubredditRecord = {
+    ...sub,
+    name: normalizedName,
+    prefixedName: sub.prefixedName ?? `r/${normalizedName}`,
+  };
   if (existing) {
     await db.put('subreddits', {
       ...existing,
-      displayName: sub.displayName ?? existing.displayName,
-      title: sub.title ?? existing.title,
-      description: sub.description ?? existing.description,
-      subscribers: sub.subscribers ?? existing.subscribers,
-      isNsfw: sub.isNsfw ?? existing.isNsfw,
-      lastFetchedAt: sub.lastFetchedAt ?? existing.lastFetchedAt,
+      displayName: normalizedSub.displayName ?? existing.displayName,
+      title: normalizedSub.title ?? existing.title,
+      description: normalizedSub.description ?? existing.description,
+      publicDescription: normalizedSub.publicDescription ?? existing.publicDescription,
+      subscribers: normalizedSub.subscribers ?? existing.subscribers,
+      isNsfw: normalizedSub.isNsfw ?? existing.isNsfw,
+      lastFetchedAt: normalizedSub.lastFetchedAt ?? existing.lastFetchedAt,
+      discoveryStatus: existing.isMuted
+        ? 'muted'
+        : normalizedSub.discoveryStatus ?? existing.discoveryStatus ?? 'discovered',
+      discoveredVia: normalizedSub.discoveredVia ?? existing.discoveredVia,
+      discoveryReason: normalizedSub.discoveryReason ?? existing.discoveryReason,
+      profileFetchedAt: normalizedSub.profileFetchedAt ?? existing.profileFetchedAt,
+      profileFetchFailedAt: normalizedSub.profileFetchFailedAt ?? existing.profileFetchFailedAt,
+      profileFetchError: normalizedSub.profileFetchedAt
+        ? undefined
+        : normalizedSub.profileFetchError ?? existing.profileFetchError,
+      adjacencyScannedAt: normalizedSub.adjacencyScannedAt ?? existing.adjacencyScannedAt,
     });
   } else {
-    await db.put('subreddits', sub);
+    await db.put('subreddits', {
+      ...normalizedSub,
+      discoveryStatus: normalizedSub.isMuted
+        ? 'muted'
+        : normalizedSub.discoveryStatus ?? 'discovered',
+    });
   }
 }
 
@@ -103,14 +152,80 @@ export async function setSubredditMuted(name: string, muted: boolean): Promise<v
   const db = await getDB();
   const sub = await db.get('subreddits', name.toLowerCase());
   if (sub) {
-    await db.put('subreddits', { ...sub, isMuted: muted });
+    await db.put('subreddits', {
+      ...sub,
+      isMuted: muted,
+      discoveryStatus: muted ? 'muted' : sub.profileFetchedAt ? 'verified' : 'discovered',
+    });
   }
+}
+
+export async function markSubredditProfileFailed(name: string, error: string): Promise<void> {
+  const normalizedName = normalizeSubredditName(name);
+  const existing = await getSubreddit(normalizedName);
+  await upsertSubreddit({
+    ...(existing ?? {
+      name: normalizedName,
+      prefixedName: `r/${normalizedName}`,
+      firstSeenAt: Date.now(),
+      localRating: 0,
+      isMuted: false,
+    }),
+    discoveryStatus: existing?.isMuted ? 'muted' : 'failed',
+    profileFetchFailedAt: Date.now(),
+    profileFetchError: error,
+  });
+}
+
+export async function getSubredditsDueForProfileScan(limit = 20, staleAfterMs = 7 * 24 * 60 * 60 * 1000): Promise<SubredditRecord[]> {
+  const now = Date.now();
+  const subs = await getAllSubreddits();
+  return subs
+    .filter((sub) => {
+      if (sub.isMuted || sub.discoveryStatus === 'muted') return false;
+      if (sub.name === 'all') return false;
+      if (sub.profileFetchFailedAt && now - sub.profileFetchFailedAt < 15 * 60 * 1000) return false;
+      return !sub.profileFetchedAt || now - sub.profileFetchedAt > staleAfterMs;
+    })
+    .sort((a, b) => {
+      const aRating = a.localRating || 0;
+      const bRating = b.localRating || 0;
+      if (bRating !== aRating) return bRating - aRating;
+      return (a.profileFetchedAt ?? 0) - (b.profileFetchedAt ?? 0);
+    })
+    .slice(0, limit);
 }
 
 // Adjacency
 export async function upsertAdjacency(link: AdjacencyLink): Promise<void> {
   const db = await getDB();
-  await db.put('adjacency', link);
+  const fromSubreddit = normalizeSubredditName(link.fromSubreddit);
+  const toSubreddit = normalizeSubredditName(link.toSubreddit);
+  const existing = await db.get('adjacency', [fromSubreddit, toSubreddit, link.source]);
+  const now = link.lastSeenAt ?? link.discoveredAt ?? Date.now();
+
+  if (existing) {
+    const nextCount = (existing.count ?? 1) + (link.count ?? 1);
+    await db.put('adjacency', {
+      ...existing,
+      evidence: link.evidence ?? existing.evidence,
+      discoveredAt: Math.min(existing.discoveredAt, link.discoveredAt),
+      lastSeenAt: now,
+      count: nextCount,
+      weight: Math.max(existing.weight ?? 1, link.weight ?? 1) + Math.log2(nextCount + 1) * 0.2,
+    });
+    return;
+  }
+
+  await db.put('adjacency', {
+    ...link,
+    fromSubreddit,
+    toSubreddit,
+    discoveredAt: link.discoveredAt ?? now,
+    lastSeenAt: now,
+    count: link.count ?? 1,
+    weight: link.weight ?? 1,
+  });
 }
 
 export async function getAdjacencyFrom(subreddit: string): Promise<AdjacencyLink[]> {
@@ -170,6 +285,12 @@ export async function getAllPosts(): Promise<PostRecord[]> {
   return db.getAll('posts');
 }
 
+export async function getPostsByIds(ids: string[]): Promise<PostRecord[]> {
+  const db = await getDB();
+  const posts = await Promise.all(ids.map((id) => db.get('posts', id)));
+  return posts.filter((post): post is PostRecord => Boolean(post));
+}
+
 // Media
 export async function upsertMedia(media: MediaGroup): Promise<void> {
   const db = await getDB();
@@ -209,24 +330,41 @@ export async function setCacheEntry(entry: CacheEntry): Promise<void> {
   await db.put('cache', entry);
 }
 
+// Feed snapshots
+export async function getFeedSnapshot(routeKey: string): Promise<FeedSnapshot | undefined> {
+  const db = await getDB();
+  return db.get('feedSnapshots', routeKey);
+}
+
+export async function setFeedSnapshot(snapshot: FeedSnapshot): Promise<void> {
+  const db = await getDB();
+  await db.put('feedSnapshots', snapshot);
+}
+
+export async function getAllFeedSnapshots(): Promise<FeedSnapshot[]> {
+  const db = await getDB();
+  return db.getAll('feedSnapshots');
+}
+
 // Export all data
 export async function exportAllData(): Promise<Record<string, unknown>> {
   const db = await getDB();
-  const [subreddits, adjacency, posts, media, events, cache] = await Promise.all([
+  const [subreddits, adjacency, posts, media, events, cache, feedSnapshots] = await Promise.all([
     db.getAll('subreddits'),
     db.getAll('adjacency'),
     db.getAll('posts'),
     db.getAll('media'),
     db.getAll('events'),
     db.getAll('cache'),
+    db.getAll('feedSnapshots'),
   ]);
-  return { subreddits, adjacency, posts, media, events, cache };
+  return { subreddits, adjacency, posts, media, events, cache, feedSnapshots };
 }
 
 // Import all data (destructive)
 export async function importAllData(data: Record<string, unknown>): Promise<void> {
   const db = await getDB();
-  const tx = db.transaction(['subreddits', 'adjacency', 'posts', 'media', 'events', 'cache'], 'readwrite');
+  const tx = db.transaction(['subreddits', 'adjacency', 'posts', 'media', 'events', 'cache', 'feedSnapshots'], 'readwrite');
 
   await Promise.all([
     tx.objectStore('subreddits').clear(),
@@ -235,6 +373,7 @@ export async function importAllData(data: Record<string, unknown>): Promise<void
     tx.objectStore('media').clear(),
     tx.objectStore('events').clear(),
     tx.objectStore('cache').clear(),
+    tx.objectStore('feedSnapshots').clear(),
   ]);
 
   for (const sub of (data.subreddits as SubredditRecord[] || [])) {
@@ -254,6 +393,9 @@ export async function importAllData(data: Record<string, unknown>): Promise<void
   }
   for (const c of (data.cache as CacheEntry[] || [])) {
     await tx.objectStore('cache').put(c);
+  }
+  for (const snapshot of (data.feedSnapshots as FeedSnapshot[] || [])) {
+    await tx.objectStore('feedSnapshots').put(snapshot);
   }
 
   await tx.done;

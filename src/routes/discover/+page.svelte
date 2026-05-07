@@ -1,11 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { SubredditRecord } from '$lib/types';
+  import { scanNextSubredditProfiles, scanSubredditProfile } from '$lib/discovery/subreddits';
   import { getAllSubreddits, getAdjacencyFrom } from '$lib/db/store';
 
   let subreddits = $state<SubredditRecord[]>([]);
   let loading = $state(true);
-  let suggestions = $state<Array<{ name: string; reason: string; score: number }>>([]);
+  let scanning = $state(false);
+  let scanMessage = $state('');
+  let suggestions = $state<Array<{ name: string; reason: string; score: number; evidence?: string }>>([]);
   let sortedSubreddits = $derived([...subreddits].sort((a, b) => b.localRating - a.localRating));
 
   onMount(async () => {
@@ -19,7 +22,7 @@
       .filter(s => !s.isMuted)
       .sort((a, b) => b.localRating - a.localRating);
 
-    const results: Array<{ name: string; reason: string; score: number }> = [];
+    const results: Array<{ name: string; reason: string; score: number; evidence?: string }> = [];
     const seen = new Set<string>();
 
     for (const sub of scored.filter(s => s.localRating > 0).slice(0, 5)) {
@@ -31,15 +34,16 @@
 
     for (const sub of scored.filter(s => s.localRating > 0).slice(0, 5)) {
       const adj = await getAdjacencyFrom(sub.name);
-      for (const link of adj.slice(0, 3)) {
+      for (const link of adj.sort((a, b) => (b.weight ?? b.count ?? 1) - (a.weight ?? a.count ?? 1)).slice(0, 5)) {
         if (!seen.has(link.toSubreddit)) {
           const adjSub = subs.find(s => s.name === link.toSubreddit);
           if (!adjSub?.isMuted) {
             seen.add(link.toSubreddit);
             results.push({
               name: link.toSubreddit,
-              reason: `Adjacent to r/${sub.name} (via ${link.source})`,
-              score: 0.5,
+              reason: `Linked from r/${sub.name} (${link.source}, ${link.count ?? 1}x)`,
+              score: 0.5 + (link.weight ?? link.count ?? 1) * 0.1,
+              evidence: link.evidence,
             });
           }
         }
@@ -62,6 +66,36 @@
     suggestions = await buildSuggestions(subreddits);
     loading = false;
   }
+
+  async function scanNext() {
+    scanning = true;
+    scanMessage = '';
+    try {
+      const results = await scanNextSubredditProfiles(20);
+      const ok = results.filter((result) => result.ok).length;
+      const links = results.reduce((sum, result) => sum + result.linksDiscovered, 0);
+      scanMessage = `Scanned ${results.length}; ${ok} ok; ${links} links found.`;
+      await refresh();
+    } catch (error) {
+      scanMessage = error instanceof Error ? error.message : String(error);
+    } finally {
+      scanning = false;
+    }
+  }
+
+  async function scanOne(name: string) {
+    scanning = true;
+    scanMessage = '';
+    try {
+      const result = await scanSubredditProfile(name);
+      scanMessage = result.ok
+        ? `Scanned r/${result.name}; ${result.linksDiscovered} links found.`
+        : `Failed r/${result.name}: ${result.error}`;
+      await refresh();
+    } finally {
+      scanning = false;
+    }
+  }
 </script>
 
 <div class="discover-page">
@@ -69,6 +103,7 @@
     <a href="/r/all" class="logo">SubGlass</a>
     <div class="nav-links">
       <a href="/r/all">all</a>
+      <a href="/roulette">roulette</a>
       <a href="/discover" class="active">discover</a>
       <a href="/admin">admin</a>
     </div>
@@ -76,9 +111,14 @@
 
   <main>
     <h1>Discover Subreddits</h1>
-    <p class="subtitle">Based on your local ratings and adjacency links</p>
+    <p class="subtitle">Based on local ratings, subreddit profile scans, and adjacency links</p>
 
-    <button class="refresh-btn" onclick={refresh}>Refresh</button>
+    <div class="toolbar">
+      <button class="refresh-btn" onclick={refresh}>Refresh</button>
+      <button class="refresh-btn" onclick={scanNext} disabled={scanning}>{scanning ? 'Scanning…' : 'Scan next 20'}</button>
+      <a href="/roulette" class="refresh-link">Roulette mode</a>
+    </div>
+    {#if scanMessage}<p class="scan-message">{scanMessage}</p>{/if}
 
     {#if loading}
       <div class="loading">Loading…</div>
@@ -96,6 +136,7 @@
             {#if s.score > 0}
               <span class="score">⭐ {s.score.toFixed(1)}</span>
             {/if}
+            {#if s.evidence}<p class="evidence">"{s.evidence}"</p>{/if}
           </div>
         {/each}
       </div>
@@ -110,7 +151,11 @@
             <span class="rating" class:positive={sub.localRating > 0} class:negative={sub.localRating < 0}>
               {sub.localRating > 0 ? '+' : ''}{sub.localRating}
             </span>
+            <span class="status">{sub.discoveryStatus ?? 'discovered'}</span>
+            {#if sub.subscribers}<span class="meta">{sub.subscribers.toLocaleString()} subs</span>{/if}
+            {#if sub.profileFetchedAt}<span class="meta">scanned {new Date(sub.profileFetchedAt).toLocaleDateString()}</span>{/if}
             {#if sub.isMuted}<span class="muted-label">muted</span>{/if}
+            <button class="scan-one" onclick={() => scanOne(sub.name)} disabled={scanning}>scan</button>
           </div>
         {/each}
       </div>
@@ -132,10 +177,14 @@
   main { max-width: 800px; margin: 0 auto; padding: 32px 16px; }
   h1 { font-size: 1.5rem; margin-bottom: 8px; }
   .subtitle { color: #888; margin-bottom: 24px; font-size: 0.9rem; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
   .refresh-btn {
     background: #2a4a6a; color: #e0e0e0; border: none;
-    padding: 8px 16px; border-radius: 4px; margin-bottom: 24px;
+    padding: 8px 16px; border-radius: 4px;
   }
+  .refresh-btn:disabled, .scan-one:disabled { opacity: 0.5; cursor: not-allowed; }
+  .refresh-link { color: #6ab0de; font-size: 0.86rem; }
+  .scan-message { color: #8fbf9e; font-size: 0.84rem; margin-bottom: 20px; }
   .loading, .empty { color: #888; padding: 32px 0; }
   .empty a { color: #6ab0de; }
   .suggestions { display: grid; gap: 12px; margin-bottom: 48px; }
@@ -147,6 +196,7 @@
   .sub-name { font-weight: 600; color: #6ab0de; font-size: 1rem; }
   .reason { color: #888; font-size: 0.85rem; flex: 1; }
   .score { color: #f0c040; font-size: 0.85rem; }
+  .evidence { flex-basis: 100%; color: #666; font-size: 0.78rem; font-style: italic; }
   h2 { font-size: 1.1rem; margin-bottom: 16px; color: #aaa; }
   .sub-table { display: flex; flex-direction: column; gap: 4px; }
   .sub-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 4px; }
@@ -156,5 +206,10 @@
   .rating { font-size: 0.85rem; color: #888; }
   .rating.positive { color: #6ab0de; }
   .rating.negative { color: #de6a6a; }
+  .status, .meta { font-size: 0.74rem; color: #777; }
   .muted-label { font-size: 0.7rem; color: #666; }
+  .scan-one {
+    background: #1d2f42; color: #d8e5ef; border: 1px solid #2b4054;
+    border-radius: 4px; padding: 4px 8px; font-size: 0.72rem;
+  }
 </style>

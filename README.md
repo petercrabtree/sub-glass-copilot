@@ -25,13 +25,15 @@ Open http://localhost:5173 in your browser.
 - **Fullscreen media feed** — browse Reddit images, videos, and galleries in a distraction-free viewer
 - **Keyboard navigation** — Arrow keys / HJKL / Space to advance; gallery-aware (within-gallery then advance)
 - **Supported routes** — `/r/<subreddit>`, `/r/all`, `/r/<sub1+sub2>`, `/`
+- **Roulette mode** — `/roulette` builds NSFW-centric weighted random `/r/sub1+sub2+...` rounds from known subreddits, defaulting to 10 subreddits, 25 images, and NSFW-only candidates, with controls for liked/new/random balance and NSFW yes/no/only mode
 - **Media types** — Reddit-hosted images (`i.redd.it`), Reddit videos (`v.redd.it`), Reddit galleries, best-effort external images
 - **Seen state** — persisted forever; small "seen" badge on revisited posts
 - **Local ratings** — thumbs up/down per post (SubGlass-only, never sent to Reddit)
 - **Implicit event log** — impression, view start/end, advance, gallery advance, open Reddit, open media, video play/pause
-- **Subreddit records** — first-class entities; seeded from every post encountered
-- **Subreddit adjacency** — extracted from `/r/X` mentions in post titles; stored with provenance
-- **Discovery mode** — `/discover` shows subreddit suggestions based on local ratings + adjacency links
+- **Subreddit records** — first-class entities; seeded from every post encountered and enriched from subreddit profile/about JSON
+- **Subreddit adjacency** — extracted from `/r/X` mentions in post titles, selftext, crossposts, and subreddit descriptions; stored with provenance, counts, and weights
+- **Feed snapshot restore** — reloads restore the same route-local visible post from IndexedDB before refreshing the feed
+- **Discovery mode** — `/discover` shows subreddit suggestions based on local ratings + adjacency links, with profile scanning controls
 - **Admin/debug page** — `/admin` shows counts, lets you inspect subreddits/posts/events/adjacency, and export/import all local state as JSON
 
 ## Architecture
@@ -45,6 +47,9 @@ src/lib/
     posts.ts            — Convert raw Reddit API responses to PostRecord + MediaGroup
   adjacency/
     extract.ts          — Extract /r/X mentions and crosspost links from text
+  discovery/
+    subreddits.ts       — Scan subreddit profiles/descriptions and seed adjacency
+    roulette.ts         — Weighted random subreddit bundle selection
   db/
     store.ts            — IndexedDB persistence (via idb) for all entities
   components/
@@ -59,6 +64,8 @@ src/routes/
     +page.svelte        — Main viewer: fetch, normalize, fullscreen feed
   discover/
     +page.svelte        — Discovery mode: subreddit suggestions
+  roulette/
+    +page.svelte        — Roulette controls and weighted round launcher
   admin/
     +page.svelte        — Admin/debug: stats, inspect, export, import
 ```
@@ -67,11 +74,12 @@ src/routes/
 
 | Entity | Key Fields | Notes |
 |--------|-----------|-------|
-| `SubredditRecord` | `name`, `localRating`, `isMuted` | Core learned object |
+| `SubredditRecord` | `name`, `localRating`, `discoveryStatus`, `profileFetchedAt` | Core learned object |
 | `PostRecord` | `id`, `subreddit`, `media`, `seenAt`, `localRating` | Durable; never re-fetched by id |
 | `MediaGroup` | `id`, `kind`, `items[]` | Normalized media for each post |
-| `AdjacencyLink` | `fromSubreddit`, `toSubreddit`, `source`, `evidence` | Subreddit graph edges |
+| `AdjacencyLink` | `fromSubreddit`, `toSubreddit`, `source`, `count`, `weight`, `evidence` | Subreddit graph edges |
 | `SignalEvent` | `type`, `postId`, `ts` | Append-only event log |
+| `FeedSnapshot` | `routeKey`, `postIds`, `currentIndex`, `afterCursor` | Reload-stable viewer state |
 
 ## Known Limitations
 
@@ -85,7 +93,6 @@ src/routes/
 
 1. More media hosts (YouTube, Redgifs, etc.)
 2. DASH video player for proper audio support
-3. Sidebar scan for richer adjacency extraction
-4. Smarter discovery weighted by dwell time
-5. Sort options (Hot/Top/New/Rising) in the UI
-6. Prefetch next N images ahead of current position
+3. Smarter discovery weighted by dwell time
+4. Sort options (Hot/Top/New/Rising) in the UI
+5. Prefetch next N images ahead of current position

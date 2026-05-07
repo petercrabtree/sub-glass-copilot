@@ -2,8 +2,9 @@
   import { onMount } from 'svelte';
   import {
     getAllSubreddits, getAllPosts, getAllMedia, getAllEvents, getAllAdjacency,
-    exportAllData, importAllData,
+    exportAllData, importAllData, getAllFeedSnapshots,
   } from '$lib/db/store';
+  import { scanNextSubredditProfiles } from '$lib/discovery/subreddits';
   import {
     clearMediaCache,
     getMediaCacheDiagnostics,
@@ -13,13 +14,14 @@
     type MediaCacheDiagnostics,
   } from '$lib/service-worker/media-cache';
   import { registerServiceWorker } from '$lib/service-worker/register';
-  import type { SubredditRecord, PostRecord, SignalEvent, AdjacencyLink } from '$lib/types';
+  import type { SubredditRecord, PostRecord, SignalEvent, AdjacencyLink, FeedSnapshot } from '$lib/types';
 
-  let stats = $state({ subreddits: 0, posts: 0, media: 0, events: 0, adjacency: 0 });
+  let stats = $state({ subreddits: 0, posts: 0, media: 0, events: 0, adjacency: 0, snapshots: 0 });
   let subreddits = $state<SubredditRecord[]>([]);
   let posts = $state<PostRecord[]>([]);
   let events = $state<SignalEvent[]>([]);
   let adjacency = $state<AdjacencyLink[]>([]);
+  let snapshots = $state<FeedSnapshot[]>([]);
   let mediaCache = $state<MediaCacheDiagnostics | null>(null);
   let activeTab = $state<'overview' | 'cache' | 'subreddits' | 'posts' | 'events' | 'adjacency'>('overview');
   let importText = $state('');
@@ -28,7 +30,10 @@
   let cacheMessage = $state('');
   let cacheError = $state('');
   let cacheBusyAction = $state<string | null>(null);
+  let scanMessage = $state('');
+  let scanBusy = $state(false);
   let loading = $state(true);
+  let sortedSubreddits = $derived([...subreddits].sort((a, b) => b.localRating - a.localRating));
 
   onMount(() => {
     void Promise.all([loadData(), loadMediaCache()]).then(() => {
@@ -55,18 +60,20 @@
   });
 
   async function loadData() {
-    const [subs, ps, ms, evs, adj] = await Promise.all([
+    const [subs, ps, ms, evs, adj, snaps] = await Promise.all([
       getAllSubreddits(),
       getAllPosts(),
       getAllMedia(),
       getAllEvents(),
       getAllAdjacency(),
+      getAllFeedSnapshots(),
     ]);
-    stats = { subreddits: subs.length, posts: ps.length, media: ms.length, events: evs.length, adjacency: adj.length };
+    stats = { subreddits: subs.length, posts: ps.length, media: ms.length, events: evs.length, adjacency: adj.length, snapshots: snaps.length };
     subreddits = subs;
     posts = ps;
     events = evs.slice(-100).reverse();
     adjacency = adj.slice(0, 100);
+    snapshots = snaps.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20);
   }
 
   async function loadMediaCache() {
@@ -148,6 +155,22 @@
     });
   }
 
+  async function scanNextProfiles() {
+    scanBusy = true;
+    scanMessage = '';
+    try {
+      const results = await scanNextSubredditProfiles(20);
+      const ok = results.filter((result) => result.ok).length;
+      const links = results.reduce((sum, result) => sum + result.linksDiscovered, 0);
+      scanMessage = `Scanned ${results.length}; ${ok} ok; ${links} links found.`;
+      await loadData();
+    } catch (error) {
+      scanMessage = error instanceof Error ? error.message : String(error);
+    } finally {
+      scanBusy = false;
+    }
+  }
+
   function handleFileImport(e: Event) {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
@@ -175,6 +198,7 @@
     <a href="/r/all" class="logo">SubGlass</a>
     <div class="nav-links">
       <a href="/r/all">viewer</a>
+      <a href="/roulette">roulette</a>
       <a href="/discover">discover</a>
       <a href="/admin" class="active">admin</a>
     </div>
@@ -206,6 +230,10 @@
         <div class="stat-card">
           <div class="stat-value">{stats.adjacency}</div>
           <div class="stat-label">Adjacency Links</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">{stats.snapshots}</div>
+          <div class="stat-label">Feed Snapshots</div>
         </div>
         <div class="stat-card">
           <div class="stat-value">{mediaCache?.entryCount ?? '—'}</div>
@@ -262,6 +290,12 @@
               </div>
               {#if cacheMessage}<p class="success">{cacheMessage}</p>{/if}
               {#if cacheError}<p class="error">{cacheError}</p>{/if}
+            </section>
+            <section>
+              <h2>Discovery Scan</h2>
+              <p>Fetch due subreddit profiles, extract linked subreddits, and update adjacency weights.</p>
+              <button class="action-btn" onclick={scanNextProfiles} disabled={scanBusy}>{scanBusy ? 'Scanning…' : 'Scan next 20'}</button>
+              {#if scanMessage}<p class="success">{scanMessage}</p>{/if}
             </section>
           </div>
 
@@ -337,11 +371,15 @@
 
         {:else if activeTab === 'subreddits'}
           <div class="data-table">
-            {#each subreddits.sort((a, b) => b.localRating - a.localRating) as sub}
+            {#each sortedSubreddits as sub}
               <div class="data-row">
                 <a href="/r/{sub.name}" class="sub-link">r/{sub.name}</a>
                 <span class="field">rating: <strong>{sub.localRating}</strong></span>
-                <span class="field">{sub.isMuted ? '🔇 muted' : ''}</span>
+                <span class="field">{sub.discoveryStatus ?? 'discovered'}</span>
+                <span class="field">{sub.isMuted ? 'muted' : ''}</span>
+                {#if sub.subscribers}<span class="field meta">{sub.subscribers.toLocaleString()} subscribers</span>{/if}
+                {#if sub.profileFetchedAt}<span class="field meta">profile: {new Date(sub.profileFetchedAt).toLocaleString()}</span>{/if}
+                {#if sub.profileFetchError}<span class="field error">{sub.profileFetchError}</span>{/if}
                 <span class="field meta">seen: {new Date(sub.firstSeenAt).toLocaleDateString()}</span>
               </div>
             {/each}
@@ -382,7 +420,20 @@
                 <span class="arrow">→</span>
                 <a href="/r/{link.toSubreddit}" class="sub-link">r/{link.toSubreddit}</a>
                 <span class="field">{link.source}</span>
+                <span class="field">count: <strong>{link.count ?? 1}</strong></span>
+                <span class="field">weight: <strong>{(link.weight ?? 1).toFixed(1)}</strong></span>
                 {#if link.evidence}<span class="field meta evidence">"{link.evidence.slice(0, 40)}"</span>{/if}
+              </div>
+            {/each}
+          </div>
+          <h2 class="snapshot-heading">Recent Feed Snapshots</h2>
+          <div class="data-table">
+            {#each snapshots as snapshot}
+              <div class="data-row">
+                <a href={snapshot.path} class="sub-link">{snapshot.path}</a>
+                <span class="field">{snapshot.postIds.length} posts</span>
+                <span class="field">index {snapshot.currentIndex + 1}</span>
+                <span class="field meta">{new Date(snapshot.updatedAt).toLocaleString()}</span>
               </div>
             {/each}
           </div>
@@ -426,7 +477,7 @@
   .tab:hover { color: #e0e0e0; }
   .tab.active { color: #6ab0de; border-bottom-color: #6ab0de; }
   .tab-content { min-height: 300px; }
-  .export-import { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+  .export-import { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; }
   .cache-panel { display: flex; flex-direction: column; gap: 20px; }
   .cache-panel-header {
     display: flex;
@@ -494,11 +545,16 @@
   .event-type { color: #aaa; font-weight: 500; min-width: 120px; }
   .arrow { color: #555; }
   .evidence { font-style: italic; }
+  .snapshot-heading { margin-top: 24px; }
+
+  @media (max-width: 1100px) {
+    .export-import {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
 
   @media (max-width: 860px) {
-    .export-import {
-      grid-template-columns: 1fr;
-    }
+    .export-import { grid-template-columns: 1fr; }
     .cache-summary-grid {
       grid-template-columns: 1fr;
     }

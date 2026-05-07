@@ -144,5 +144,5 @@ export interface SubredditRouletteSettings {
   likedWeight: number;
   newWeight: number;
   randomWeight: number;
-  includeNsfw: boolean;
+  nsfwMode: 'yes' | 'no' | 'only';
 }

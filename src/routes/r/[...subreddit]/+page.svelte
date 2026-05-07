@@ -1,16 +1,27 @@
 <script lang="ts">
   import { dev } from '$app/environment';
+  import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
-  import type { MediaGroup, MediaItem, MediaKind, PostRecord } from '$lib/types';
+  import type { FeedSnapshot, MediaGroup, MediaItem, MediaKind, PostRecord, SubredditRouletteSettings } from '$lib/types';
   import { fetchListing, readRedditDebugState } from '$lib/transport/reddit';
   import type { RedditDebugState, RedditRequestError } from '$lib/transport/reddit';
   import { normalizeListingResponse } from '$lib/normalize/posts';
   import { enrichRedgifsPosts } from '$lib/media/redgifs';
+  import { scanSubredditProfiles } from '$lib/discovery/subreddits';
+  import {
+    DEFAULT_ROULETTE_SETTINGS,
+    chooseRouletteSubreddits,
+    formatRouletteBundle,
+    normalizeRouletteSettings,
+    persistRouletteSettings,
+    readStoredRouletteSettings,
+  } from '$lib/discovery/roulette';
   import {
     upsertPost, upsertSubreddit, upsertMedia, upsertAdjacency,
     markPostSeen, setPostRating, getPost, getSeenPostIds, addEvent,
-    getSubreddit, updateSubredditRating,
+    getSubreddit, updateSubredditRating, getFeedSnapshot, setFeedSnapshot,
+    getPostsByIds, getAllSubreddits,
   } from '$lib/db/store';
   import { extractLinksFromPost } from '$lib/adjacency/extract';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
@@ -68,6 +79,8 @@
   const DISPLAY_MODE_STORAGE_KEY = 'subglass:display-mode';
   const AUTO_ADVANCE_SETTINGS_STORAGE_KEY = 'subglass:auto-advance-settings';
   const VIEWER_UI_MODE_STORAGE_KEY = 'subglass:viewer-ui-mode';
+  const FEED_SNAPSHOT_SAVE_DELAY_MS = 160;
+  const ROULETTE_QUERY_PARAM = 'roulette';
   const MIN_VIDEO_ADVANCE_MS = 5000;
   const VIEWER_UI_DISENGAGE_DELAY_MS = 900;
   const DISPLAY_MODES: Array<{
@@ -123,13 +136,18 @@
   let autoAdvanceInFlight = $state(false);
   let scrollSyncFrame = 0;
   let masonrySyncFrame = 0;
+  let snapshotSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let lastRouteLoadKey = '';
+  let activeRouteKey = '';
   let viewerUiEngaged = $state(false);
   let viewerUiDisengageTimer: ReturnType<typeof setTimeout> | undefined;
   let mediaCacheByUrl = $state<Record<string, boolean>>({});
   let mediaCacheRuntime = $state<MediaCacheRuntimeState>('inactive');
   let mediaCacheProbeGeneration = 0;
   let lastVideoLoopBoundaryAt = $state(0);
+  let rouletteSettings = $state<SubredditRouletteSettings>(DEFAULT_ROULETTE_SETTINGS);
+  let rouletteTransitioning = $state(false);
+  let rouletteMessage = $state('');
 
   function formatErrorJson(feedError: RedditRequestError): string {
     return JSON.stringify(feedError, null, 2);
@@ -584,6 +602,7 @@
     currentIndex = index;
     galleryIndex = 0;
     syncCurrentSelectionState();
+    scheduleFeedSnapshotSave();
   }
 
   async function selectPost(index: number) {
@@ -660,12 +679,125 @@
   }
 
   function extractSubreddits(sub: string) {
-    return sub.split('/')[0]?.split('+') ?? [];
+    return sub
+      .split('/')[0]
+      ?.split('+')
+      .map((name) => name.trim().replace(/^\/?r\//i, '').toLowerCase())
+      .filter(Boolean) ?? [];
+  }
+
+  function getFeedRouteKey(sub: string, time: string | undefined, roulette: boolean) {
+    return `${roulette ? 'roulette' : 'feed'}:/r/${sub}?t=${time ?? ''}`;
+  }
+
+  function getFeedPath(sub: string, time: string | undefined, roulette: boolean) {
+    const params = new URLSearchParams();
+    if (time) params.set('t', time);
+    if (roulette) params.set(ROULETTE_QUERY_PARAM, '1');
+    const query = params.toString();
+    return `/r/${sub}${query ? `?${query}` : ''}`;
+  }
+
+  function clampIndex(index: number, length: number) {
+    if (length <= 0) return 0;
+    return Math.min(length - 1, Math.max(0, Math.round(index)));
+  }
+
+  function mergePostsPreservingCurrent(freshPosts: PostRecord[], shouldPreserveCurrent: boolean) {
+    if (!shouldPreserveCurrent || !currentPost) return { mergedPosts: freshPosts, nextIndex: 0 };
+
+    const anchorId = currentPost.id;
+    const seen = new Set(posts.map((post) => post.id));
+    const mergedPosts = [...posts];
+
+    for (const post of freshPosts) {
+      if (seen.has(post.id)) continue;
+      seen.add(post.id);
+      mergedPosts.push(post);
+    }
+
+    return {
+      mergedPosts,
+      nextIndex: clampIndex(mergedPosts.findIndex((post) => post.id === anchorId), mergedPosts.length),
+    };
+  }
+
+  async function hydrateFeedSnapshot(routeKey: string) {
+    const snapshot = await getFeedSnapshot(routeKey);
+    if (!snapshot?.postIds.length) return false;
+
+    const storedPosts = (await getPostsByIds(snapshot.postIds)).filter((post) => post.media);
+    if (storedPosts.length === 0) return false;
+
+    posts = storedPosts;
+    afterCursor = snapshot.afterCursor ?? null;
+    currentIndex = clampIndex(snapshot.currentIndex, storedPosts.length);
+    galleryIndex = clampIndex(
+      snapshot.galleryIndex || 0,
+      storedPosts[currentIndex]?.media?.items.length ?? 1
+    );
+    loading = false;
+    error = null;
+    syncCurrentSelectionState();
+    requestAnimationFrame(() => focusCurrentPostInActiveMode('auto'));
+    return true;
+  }
+
+  async function persistCurrentFeedSnapshot() {
+    if (!activeRouteKey || posts.length === 0) return;
+
+    const snapshot: FeedSnapshot = {
+      routeKey: activeRouteKey,
+      path: getFeedPath(subredditParam, listingTime, isRouletteMode),
+      subreddits: extractSubreddits(subredditParam),
+      time: listingTime,
+      afterCursor,
+      postIds: posts.map((post) => post.id),
+      currentIndex,
+      galleryIndex,
+      updatedAt: Date.now(),
+    };
+
+    await setFeedSnapshot(snapshot);
+  }
+
+  function scheduleFeedSnapshotSave() {
+    clearTimeout(snapshotSaveTimer);
+    snapshotSaveTimer = setTimeout(() => {
+      void persistCurrentFeedSnapshot();
+    }, FEED_SNAPSHOT_SAVE_DELAY_MS);
+  }
+
+  async function persistLoadedPosts(mediaPosts: PostRecord[], routePath: string) {
+    await Promise.all(mediaPosts.map(async (post) => {
+      const routedPost = { ...post, fetchedInRoute: routePath };
+      await upsertPost(routedPost);
+      if (routedPost.media) await upsertMedia(routedPost.media);
+      await ensureSubreddit(routedPost.subreddit, undefined, undefined, routedPost.isNsfw);
+      const links = extractLinksFromPost(
+        routedPost.title,
+        routedPost.selftext ?? '',
+        routedPost.subreddit,
+        routedPost.crosspostParentSubreddit
+      );
+      for (const link of links) {
+        await upsertAdjacency(link);
+        await ensureSubreddit(link.toSubreddit, `${link.source}:r/${routedPost.subreddit}`, link.evidence);
+      }
+    }));
+  }
+
+  function getProfileScanTargets(sub: string, mediaPosts: PostRecord[]) {
+    const routeSubs = extractSubreddits(sub).filter((name) => name !== 'all');
+    if (routeSubs.length > 0 && routeSubs.length <= 12) return routeSubs;
+
+    return [...new Set(mediaPosts.slice(0, 6).map((post) => post.subreddit).filter(Boolean))];
   }
 
   const feedStatus = $derived(
     error ? `error:${error.kind}` : loading ? 'loading' : posts.length > 0 ? 'ready' : 'idle'
   );
+  const isRouletteMode = $derived($page.url.searchParams.get(ROULETTE_QUERY_PARAM) === '1');
 
   const currentPost = $derived(posts[currentIndex]);
   const currentMedia = $derived(currentPost?.media);
@@ -674,6 +806,10 @@
   const isSeen = $derived(currentPost ? seenIds.has(currentPost.id) : false);
   const currentDisplayMode = $derived(
     DISPLAY_MODES.find((mode) => mode.id === displayMode) ?? DISPLAY_MODES[0]
+  );
+  const activeSubredditBundle = $derived(extractSubreddits(subredditParam).filter((name) => name !== 'all'));
+  const rouletteRoundProgress = $derived(
+    Math.min(currentIndex + 1, rouletteSettings.imagesPerRound)
   );
   const autoAdvanceSuspended = $derived(
     autoAdvancePaused ||
@@ -828,13 +964,14 @@
   $effect(() => {
     const sub = $page.params.subreddit || 'all';
     const time = $page.url.searchParams.get('t') || undefined;
-    const routeKey = `${sub}?${time ?? ''}`;
+    const roulette = $page.url.searchParams.get(ROULETTE_QUERY_PARAM) === '1';
+    const routeKey = getFeedRouteKey(sub, time, roulette);
     if (routeKey === lastRouteLoadKey) return;
     lastRouteLoadKey = routeKey;
     subredditParam = sub;
     listingTime = time;
-    pathInput = time ? `/r/${sub}?t=${time}` : `/r/${sub}`;
-    loadFeed(sub, time);
+    pathInput = getFeedPath(sub, time, roulette);
+    loadFeed(sub, time, roulette);
   });
 
   $effect(() => {
@@ -870,6 +1007,16 @@
     void videoAdvancePlays;
     void autoAdvancePaused;
     persistAutoAdvanceSettings();
+  });
+
+  $effect(() => {
+    void rouletteSettings.subredditCount;
+    void rouletteSettings.imagesPerRound;
+    void rouletteSettings.likedWeight;
+    void rouletteSettings.newWeight;
+    void rouletteSettings.randomWeight;
+    void rouletteSettings.nsfwMode;
+    persistRouletteSettings(rouletteSettings);
   });
 
   $effect(() => {
@@ -929,14 +1076,20 @@
     return () => cancelAnimationFrame(frame);
   });
 
-  async function loadFeed(sub: string, time: string | undefined = listingTime) {
-    loading = true;
+  async function loadFeed(sub: string, time: string | undefined = listingTime, roulette = isRouletteMode) {
+    const routeKey = getFeedRouteKey(sub, time, roulette);
+    activeRouteKey = routeKey;
+    const restored = await hydrateFeedSnapshot(routeKey);
+
+    loading = !restored;
     error = null;
-    posts = [];
-    currentIndex = 0;
-    galleryIndex = 0;
-    afterCursor = null;
-    syncCurrentSelectionState();
+    if (!restored) {
+      posts = [];
+      currentIndex = 0;
+      galleryIndex = 0;
+      afterCursor = null;
+      syncCurrentSelectionState();
+    }
     seenIds = await getSeenPostIds();
 
     const spec = { path: `/r/${sub}`, subreddits: extractSubreddits(sub), time };
@@ -944,7 +1097,9 @@
     syncRedditDebug();
     if (!result.ok) {
       console.error('Failed to load feed', result.error);
-      error = result.error;
+      if (!restored) {
+        error = result.error;
+      }
       loading = false;
       return;
     }
@@ -953,23 +1108,24 @@
     const normalized = await enrichRedgifsPosts(normalizeListingResponse(result.data.data.children));
     const mediaPosts = normalized.filter((post) => post.media);
 
-    await Promise.all(mediaPosts.map(async (post) => {
-      await upsertPost(post);
-      if (post.media) await upsertMedia(post.media);
-      await ensureSubreddit(post.subreddit);
-      const links = extractLinksFromPost(post.title, '', post.subreddit, undefined);
-      for (const link of links) {
-        await upsertAdjacency(link);
-        await ensureSubreddit(link.toSubreddit);
-      }
-    }));
+    await persistLoadedPosts(mediaPosts, getFeedPath(sub, time, roulette));
 
-    posts = mediaPosts;
+    const { mergedPosts, nextIndex } = mergePostsPreservingCurrent(mediaPosts, restored);
+    posts = mergedPosts;
+    currentIndex = nextIndex;
     loading = false;
     syncCurrentSelectionState();
+    scheduleFeedSnapshotSave();
+
+    const scanTargets = getProfileScanTargets(sub, mediaPosts);
+    if (scanTargets.length > 0) {
+      void scanSubredditProfiles(scanTargets).catch((scanError) => {
+        console.warn('Failed to scan subreddit profiles', scanError);
+      });
+    }
 
     if (mediaPosts.length > 0) {
-      await recordEvent('impression', mediaPosts[0]);
+      await recordEvent('impression', posts[currentIndex]);
     }
   }
 
@@ -991,13 +1147,11 @@
       const normalized = await enrichRedgifsPosts(normalizeListingResponse(result.data.data.children));
       const mediaPosts = normalized.filter((post) => post.media);
 
-      await Promise.all(mediaPosts.map(async (post) => {
-        await upsertPost(post);
-        if (post.media) await upsertMedia(post.media);
-        await ensureSubreddit(post.subreddit);
-      }));
+      await persistLoadedPosts(mediaPosts, getFeedPath(subredditParam, listingTime, isRouletteMode));
 
-      posts = [...posts, ...mediaPosts];
+      const existingIds = new Set(posts.map((post) => post.id));
+      posts = [...posts, ...mediaPosts.filter((post) => !existingIds.has(post.id))];
+      scheduleFeedSnapshotSave();
     } else {
       console.error('Failed to load more posts', result.error);
     }
@@ -1005,7 +1159,46 @@
     loadingMore = false;
   }
 
-  async function ensureSubreddit(name: string) {
+  async function startNextRouletteRound() {
+    if (rouletteTransitioning) return;
+    rouletteTransitioning = true;
+    rouletteMessage = '';
+
+    try {
+      const allSubreddits = await getAllSubreddits();
+      const selected = chooseRouletteSubreddits(allSubreddits, rouletteSettings, activeSubredditBundle);
+      if (selected.length === 0) {
+        rouletteMessage = 'No eligible known subreddits yet. Scan or browse a few first.';
+        return;
+      }
+
+      const bundle = formatRouletteBundle(selected);
+      await goto(`/r/${bundle}?${ROULETTE_QUERY_PARAM}=1`);
+    } finally {
+      rouletteTransitioning = false;
+    }
+  }
+
+  function updateRouletteSettings(nextSettings: Partial<SubredditRouletteSettings>) {
+    rouletteSettings = normalizeRouletteSettings({
+      ...rouletteSettings,
+      ...nextSettings,
+    });
+  }
+
+  function handleRouletteNumberInput(
+    key: 'subredditCount' | 'imagesPerRound' | 'likedWeight' | 'newWeight' | 'randomWeight',
+    event: Event
+  ) {
+    updateRouletteSettings({ [key]: Number((event.currentTarget as HTMLInputElement).value) });
+  }
+
+  async function ensureSubreddit(
+    name: string,
+    discoveredVia?: string,
+    discoveryReason?: string,
+    isNsfwHint?: boolean
+  ) {
     const existing = await getSubreddit(name);
     if (!existing) {
       await upsertSubreddit({
@@ -1014,6 +1207,22 @@
         firstSeenAt: Date.now(),
         localRating: 0,
         isMuted: false,
+        isNsfw: isNsfwHint,
+        discoveryStatus: 'discovered',
+        discoveredVia,
+        discoveryReason,
+      });
+    } else {
+      const nextIsNsfw = existing.isNsfw === true
+        ? true
+        : isNsfwHint ?? existing.isNsfw;
+      if (!discoveredVia && !discoveryReason && nextIsNsfw === existing.isNsfw) return;
+
+      await upsertSubreddit({
+        ...existing,
+        isNsfw: nextIsNsfw,
+        discoveredVia: existing.discoveredVia ?? discoveredVia,
+        discoveryReason: existing.discoveryReason ?? discoveryReason,
       });
     }
   }
@@ -1038,10 +1247,16 @@
     await recordEvent('advance_next', currentPost);
     await recordEvent('view_end', currentPost);
 
+    if (isRouletteMode && currentIndex + 1 >= rouletteSettings.imagesPerRound) {
+      await startNextRouletteRound();
+      return;
+    }
+
     if (currentIndex < posts.length - 1) {
       currentIndex++;
       galleryIndex = 0;
       syncCurrentSelectionState();
+      scheduleFeedSnapshotSave();
       focusCurrentPostInActiveMode('smooth');
       await recordEvent('impression', posts[currentIndex]);
       await recordEvent('view_start', posts[currentIndex]);
@@ -1049,6 +1264,8 @@
       if (currentIndex >= posts.length - 5) {
         void loadMore();
       }
+    } else if (isRouletteMode) {
+      await startNextRouletteRound();
     }
   }
 
@@ -1058,6 +1275,7 @@
       currentIndex--;
       galleryIndex = 0;
       syncCurrentSelectionState();
+      scheduleFeedSnapshotSave();
       focusCurrentPostInActiveMode('smooth');
       await recordEvent('impression', posts[currentIndex]);
     }
@@ -1069,6 +1287,7 @@
     if (galleryIndex < currentMedia.items.length - 1) {
       galleryIndex++;
       syncCurrentSelectionState();
+      scheduleFeedSnapshotSave();
       await recordEvent('advance_gallery', currentPost);
     } else {
       await advance();
@@ -1079,6 +1298,7 @@
     if (galleryIndex > 0) {
       galleryIndex--;
       syncCurrentSelectionState();
+      scheduleFeedSnapshotSave();
     } else {
       await retreat();
     }
@@ -1093,10 +1313,9 @@
     posts = posts.map((post) => post.id === currentPost.id ? { ...post, localRating: newRating } : post);
     await recordEvent('rating_explicit', currentPost);
 
-    if (newRating === 1) {
-      await updateSubredditRating(currentPost.subreddit, 1);
-    } else if (existing?.localRating === 1) {
-      await updateSubredditRating(currentPost.subreddit, -1);
+    const delta = (newRating ?? 0) - (existing?.localRating ?? 0);
+    if (delta !== 0) {
+      await updateSubredditRating(currentPost.subreddit, delta);
     }
   }
 
@@ -1109,10 +1328,9 @@
     posts = posts.map((post) => post.id === currentPost.id ? { ...post, localRating: newRating } : post);
     await recordEvent('rating_explicit', currentPost);
 
-    if (newRating === -1) {
-      await updateSubredditRating(currentPost.subreddit, -1);
-    } else if (existing?.localRating === -1) {
-      await updateSubredditRating(currentPost.subreddit, 1);
+    const delta = (newRating ?? 0) - (existing?.localRating ?? 0);
+    if (delta !== 0) {
+      await updateSubredditRating(currentPost.subreddit, delta);
     }
   }
 
@@ -1322,6 +1540,7 @@
       videoAdvancePlays = storedAutoAdvance.videoPlays;
       autoAdvancePaused = storedAutoAdvance.paused;
     }
+    rouletteSettings = readStoredRouletteSettings();
 
     void refreshMediaCacheRuntime();
 
@@ -1353,13 +1572,13 @@
       cancelAnimationFrame(scrollSyncFrame);
       cancelAnimationFrame(masonrySyncFrame);
       clearTimeout(viewerUiDisengageTimer);
+      clearTimeout(snapshotSaveTimer);
     };
   });
 
   async function navigate() {
     const normalized = pathInput.trim().startsWith('/') ? pathInput.trim() : `/${pathInput.trim()}`;
     if (normalized.startsWith('/r/')) {
-      const { goto } = await import('$app/navigation');
       goto(normalized);
     }
   }
@@ -1718,6 +1937,9 @@
 	      <span class="route-chip" title={pathInput}>{pathInput || '/r/all'}</span>
 	      <span class="mode-chip" title={currentDisplayMode.blurb}>{currentDisplayMode.label}</span>
 	      <span class="ui-mode-chip">{viewerUiMode}</span>
+	      {#if isRouletteMode}
+	        <span class="roulette-chip">roulette {rouletteRoundProgress}/{rouletteSettings.imagesPerRound}</span>
+	      {/if}
 
 	      <details class="topbar-menu">
 	        <summary aria-label="Viewer menu">menu</summary>
@@ -1739,6 +1961,7 @@
 	              <a href="/r/all">all</a>
 	              <a href="/r/pics">pics</a>
 	              <a href="/r/videos">videos</a>
+	              <a href="/roulette">roulette</a>
 	              <a href="/discover">discover</a>
 	              <a href="/admin">admin</a>
 	            </div>
@@ -1779,6 +2002,90 @@
 	              {/each}
 	            </div>
 	          </div>
+
+	          <div class="menu-section">
+	            <span class="menu-label">roulette</span>
+	            <div class="roulette-settings-grid">
+	              <label class="roulette-setting">
+	                <span>subs</span>
+	                <input
+	                  type="number"
+	                  min="1"
+	                  max="12"
+	                  value={rouletteSettings.subredditCount}
+	                  oninput={(event) => handleRouletteNumberInput('subredditCount', event)}
+	                />
+	              </label>
+	              <label class="roulette-setting">
+	                <span>images</span>
+	                <input
+	                  type="number"
+	                  min="3"
+	                  max="80"
+	                  value={rouletteSettings.imagesPerRound}
+	                  oninput={(event) => handleRouletteNumberInput('imagesPerRound', event)}
+	                />
+	              </label>
+	              <label class="roulette-setting">
+	                <span>liked</span>
+	                <input
+	                  type="range"
+	                  min="0"
+	                  max="10"
+	                  step="0.5"
+	                  value={rouletteSettings.likedWeight}
+	                  oninput={(event) => handleRouletteNumberInput('likedWeight', event)}
+	                />
+	              </label>
+	              <label class="roulette-setting">
+	                <span>new</span>
+	                <input
+	                  type="range"
+	                  min="0"
+	                  max="10"
+	                  step="0.5"
+	                  value={rouletteSettings.newWeight}
+	                  oninput={(event) => handleRouletteNumberInput('newWeight', event)}
+	                />
+	              </label>
+	              <label class="roulette-setting">
+	                <span>random</span>
+	                <input
+	                  type="range"
+	                  min="0"
+	                  max="10"
+	                  step="0.5"
+	                  value={rouletteSettings.randomWeight}
+	                  oninput={(event) => handleRouletteNumberInput('randomWeight', event)}
+	                />
+	              </label>
+	              <div class="roulette-setting roulette-setting--wide">
+	                <span>nsfw</span>
+	                <div class="roulette-segmented" role="radiogroup" aria-label="NSFW mode">
+	                  {#each (['only', 'yes', 'no'] as const) as mode}
+	                    <button
+	                      type="button"
+	                      role="radio"
+	                      class:active={rouletteSettings.nsfwMode === mode}
+	                      aria-checked={rouletteSettings.nsfwMode === mode}
+	                      onclick={() => updateRouletteSettings({ nsfwMode: mode })}
+	                    >
+	                      {mode}
+	                    </button>
+	                  {/each}
+	                </div>
+	              </div>
+	            </div>
+	            <div class="roulette-actions">
+	              <button type="button" onclick={startNextRouletteRound} disabled={rouletteTransitioning}>
+	                {isRouletteMode ? 'Next round' : 'Start'}
+	              </button>
+	              <a href="/roulette">setup</a>
+	            </div>
+	            {#if rouletteMessage}
+	              <p class="roulette-message">{rouletteMessage}</p>
+	            {/if}
+	          </div>
 	        </div>
 	      </details>
 	    </div>
@@ -1793,6 +2100,9 @@
 	      >
 	        <span class="status-progress" aria-hidden="true"></span>
 	        <span class="status-count counter">{currentIndex + 1} / {posts.length}</span>
+	        {#if isRouletteMode}
+	          <span class="status-count roulette-counter">round {rouletteRoundProgress}/{rouletteSettings.imagesPerRound}</span>
+	        {/if}
 	        {#if totalItems > 1}
 	          <span class="status-count gallery-counter">img {galleryIndex + 1}/{totalItems}</span>
 	        {/if}
@@ -2157,6 +2467,7 @@
   .route-chip,
   .mode-chip,
   .ui-mode-chip,
+  .roulette-chip,
   .topbar-menu summary,
   .ui-reveal-button {
     display: inline-flex;
@@ -2188,6 +2499,14 @@
   .ui-mode-chip {
     padding: 0 8px;
     color: rgba(195, 206, 216, 0.78);
+  }
+
+  .roulette-chip {
+    padding: 0 8px;
+    color: rgba(166, 231, 194, 0.88);
+    background: rgba(94, 179, 128, 0.12);
+    border-color: rgba(117, 217, 156, 0.18);
+    font-variant-numeric: tabular-nums;
   }
 
   .topbar-menu {
@@ -2258,6 +2577,8 @@
   .path-form button,
   .display-chip,
   .ui-chip,
+  .roulette-actions button,
+  .roulette-segmented button,
   .selection-action {
     border: 1px solid rgba(255, 255, 255, 0.08);
     color: rgba(229, 241, 250, 0.9);
@@ -2281,6 +2602,8 @@
   .path-form button:hover,
   .display-chip:hover,
   .ui-chip:hover,
+  .roulette-actions button:hover,
+  .roulette-segmented button:hover,
   .selection-action:hover {
     background: rgba(255, 255, 255, 0.11);
     border-color: rgba(255, 255, 255, 0.12);
@@ -2360,6 +2683,88 @@
     background: rgba(140, 199, 239, 0.16);
     border-color: rgba(140, 199, 239, 0.24);
     box-shadow: 0 10px 22px rgba(14, 20, 26, 0.14);
+  }
+
+  .roulette-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .roulette-setting {
+    display: grid;
+    grid-template-columns: 62px minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
+    color: rgba(204, 216, 226, 0.88);
+    font-size: 0.72rem;
+  }
+
+  .roulette-setting input[type='number'] {
+    width: 100%;
+    min-width: 0;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(6, 9, 13, 0.72);
+    color: #edf6ff;
+    padding: 6px 7px;
+    font-size: 0.74rem;
+  }
+
+  .roulette-setting input[type='range'] {
+    width: 100%;
+  }
+
+  .roulette-setting--wide {
+    grid-column: 1 / -1;
+  }
+
+  .roulette-segmented {
+    display: inline-grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .roulette-segmented button {
+    min-width: 0;
+    min-height: 28px;
+    padding: 0 8px;
+    border-radius: 9px;
+    font-size: 0.72rem;
+  }
+
+  .roulette-segmented button.active {
+    opacity: 1;
+    background: rgba(112, 207, 150, 0.18);
+    border-color: rgba(117, 217, 156, 0.32);
+    color: #eefcf2;
+  }
+
+  .roulette-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .roulette-actions button {
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 10px;
+    font-size: 0.74rem;
+  }
+
+  .roulette-actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .roulette-actions a,
+  .roulette-message {
+    color: rgba(154, 211, 247, 0.9);
+    font-size: 0.72rem;
   }
 
   .ui-reveal-button {

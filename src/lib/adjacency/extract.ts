@@ -2,6 +2,20 @@ import type { AdjacencyLink } from '$lib/types';
 
 const SUBREDDIT_MENTION_RE = /\/?r\/([A-Za-z0-9_]{2,21})/g;
 
+function getSourceWeight(source: AdjacencyLink['source']): number {
+  switch (source) {
+    case 'crosspost':
+      return 1.8;
+    case 'description':
+    case 'sidebar':
+      return 1.4;
+    case 'widget':
+      return 1.2;
+    case 'mention':
+      return 1;
+  }
+}
+
 export function extractMentions(
   text: string,
   fromSubreddit: string,
@@ -29,6 +43,9 @@ export function extractMentions(
       source,
       evidence,
       discoveredAt: now,
+      lastSeenAt: now,
+      count: 1,
+      weight: getSourceWeight(source),
     });
   }
 
@@ -52,6 +69,9 @@ export function extractLinksFromPost(
       toSubreddit: crosspostParentSubreddit.toLowerCase(),
       source: 'crosspost',
       discoveredAt: Date.now(),
+      lastSeenAt: Date.now(),
+      count: 1,
+      weight: getSourceWeight('crosspost'),
     });
   }
   return links;
