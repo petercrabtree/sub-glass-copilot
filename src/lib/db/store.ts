@@ -1,7 +1,14 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type {
-  SubredditRecord, AdjacencyLink, PostRecord, MediaGroup, SignalEvent, CacheEntry, FeedSnapshot
+  SubredditRecord, SubredditAvailabilityStatus, AdjacencyLink, PostRecord, MediaGroup, SignalEvent, CacheEntry, FeedSnapshot
 } from '$lib/types';
+
+const UNAVAILABLE_SUBREDDIT_STATUSES = new Set<SubredditAvailabilityStatus>([
+  'banned',
+  'private',
+  'quarantined',
+  'not_found',
+]);
 
 interface SubGlassDB extends DBSchema {
   subreddits: {
@@ -88,6 +95,16 @@ function normalizeSubredditName(name: string): string {
   return name.trim().replace(/^\/?r\//i, '').toLowerCase();
 }
 
+export function isSubredditUnavailableStatus(status: SubredditAvailabilityStatus | undefined): boolean {
+  return Boolean(status && UNAVAILABLE_SUBREDDIT_STATUSES.has(status));
+}
+
+export function isSubredditUnavailable(
+  sub: Pick<SubredditRecord, 'availabilityStatus'> | undefined
+): boolean {
+  return isSubredditUnavailableStatus(sub?.availabilityStatus);
+}
+
 // Subreddits
 export async function upsertSubreddit(sub: SubredditRecord): Promise<void> {
   const db = await getDB();
@@ -98,7 +115,13 @@ export async function upsertSubreddit(sub: SubredditRecord): Promise<void> {
     name: normalizedName,
     prefixedName: sub.prefixedName ?? `r/${normalizedName}`,
   };
+  const incomingAvailability = normalizedSub.availabilityStatus
+    ?? (normalizedSub.profileFetchedAt ? 'available' : undefined);
   if (existing) {
+    const availabilityStatus = incomingAvailability ?? existing.availabilityStatus;
+    const availabilityCheckedAt = normalizedSub.availabilityCheckedAt
+      ?? (normalizedSub.profileFetchedAt ? normalizedSub.profileFetchedAt : existing.availabilityCheckedAt);
+    const unavailable = isSubredditUnavailableStatus(availabilityStatus);
     await db.put('subreddits', {
       ...existing,
       displayName: normalizedSub.displayName ?? existing.displayName,
@@ -118,11 +141,32 @@ export async function upsertSubreddit(sub: SubredditRecord): Promise<void> {
       profileFetchError: normalizedSub.profileFetchedAt
         ? undefined
         : normalizedSub.profileFetchError ?? existing.profileFetchError,
+      availabilityStatus,
+      availabilityCheckedAt,
+      availabilityReason: unavailable
+        ? normalizedSub.availabilityReason ?? existing.availabilityReason
+        : undefined,
+      availabilityDetail: unavailable
+        ? normalizedSub.availabilityDetail ?? existing.availabilityDetail
+        : undefined,
+      unavailableSince: unavailable
+        ? normalizedSub.unavailableSince ?? existing.unavailableSince ?? availabilityCheckedAt ?? Date.now()
+        : undefined,
       adjacencyScannedAt: normalizedSub.adjacencyScannedAt ?? existing.adjacencyScannedAt,
     });
   } else {
+    const availabilityStatus = incomingAvailability;
+    const unavailable = isSubredditUnavailableStatus(availabilityStatus);
     await db.put('subreddits', {
       ...normalizedSub,
+      availabilityStatus,
+      availabilityCheckedAt: normalizedSub.availabilityCheckedAt
+        ?? (normalizedSub.profileFetchedAt ? normalizedSub.profileFetchedAt : undefined),
+      availabilityReason: unavailable ? normalizedSub.availabilityReason : undefined,
+      availabilityDetail: unavailable ? normalizedSub.availabilityDetail : undefined,
+      unavailableSince: unavailable
+        ? normalizedSub.unavailableSince ?? normalizedSub.availabilityCheckedAt ?? Date.now()
+        : undefined,
       discoveryStatus: normalizedSub.isMuted
         ? 'muted'
         : normalizedSub.discoveryStatus ?? 'discovered',
@@ -181,6 +225,24 @@ export async function clearSubredditProfileFailure(name: string): Promise<void> 
   }
 }
 
+export async function markSubredditAvailable(name: string): Promise<void> {
+  const normalizedName = normalizeSubredditName(name);
+  const existing = await getSubreddit(normalizedName);
+  if (!existing) return;
+
+  await upsertSubreddit({
+    ...existing,
+    discoveryStatus: existing.isMuted ? 'muted' : existing.profileFetchedAt ? 'verified' : 'discovered',
+    profileFetchFailedAt: undefined,
+    profileFetchError: undefined,
+    availabilityStatus: 'available',
+    availabilityCheckedAt: Date.now(),
+    availabilityReason: undefined,
+    availabilityDetail: undefined,
+    unavailableSince: undefined,
+  });
+}
+
 export async function markSubredditProfileFailed(name: string, error: string): Promise<void> {
   const normalizedName = normalizeSubredditName(name);
   const existing = await getSubreddit(normalizedName);
@@ -198,12 +260,49 @@ export async function markSubredditProfileFailed(name: string, error: string): P
   });
 }
 
+export async function markSubredditUnavailable(
+  name: string,
+  status: Exclude<SubredditAvailabilityStatus, 'available' | 'unknown'>,
+  error: string,
+  detail?: string
+): Promise<void> {
+  const normalizedName = normalizeSubredditName(name);
+  const existing = await getSubreddit(normalizedName);
+  const now = Date.now();
+  await upsertSubreddit({
+    ...(existing ?? {
+      name: normalizedName,
+      prefixedName: `r/${normalizedName}`,
+      firstSeenAt: now,
+      localRating: 0,
+      isMuted: false,
+    }),
+    discoveryStatus: existing?.isMuted ? 'muted' : 'failed',
+    profileFetchFailedAt: now,
+    profileFetchError: error,
+    availabilityStatus: status,
+    availabilityCheckedAt: now,
+    availabilityReason: status,
+    availabilityDetail: detail ?? error,
+    unavailableSince: existing?.unavailableSince ?? now,
+  });
+}
+
+export async function getUnavailableSubreddits(
+  statuses?: SubredditAvailabilityStatus[]
+): Promise<SubredditRecord[]> {
+  const allowed = statuses ? new Set(statuses) : UNAVAILABLE_SUBREDDIT_STATUSES;
+  const subs = await getAllSubreddits();
+  return subs.filter((sub) => sub.availabilityStatus && allowed.has(sub.availabilityStatus));
+}
+
 export async function getSubredditsDueForProfileScan(limit = 20, staleAfterMs = 7 * 24 * 60 * 60 * 1000): Promise<SubredditRecord[]> {
   const now = Date.now();
   const subs = await getAllSubreddits();
   return subs
     .filter((sub) => {
       if (sub.isMuted || sub.discoveryStatus === 'muted') return false;
+      if (isSubredditUnavailable(sub)) return false;
       if (sub.name === 'all') return false;
       if (sub.profileFetchFailedAt && now - sub.profileFetchFailedAt < 15 * 60 * 1000) return false;
       return !sub.profileFetchedAt || now - sub.profileFetchedAt > staleAfterMs;

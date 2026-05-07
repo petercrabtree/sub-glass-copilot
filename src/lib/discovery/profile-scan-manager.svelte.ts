@@ -2,12 +2,24 @@ import {
   getAllSubreddits,
   getSubreddit,
   getSubredditsDueForProfileScan,
+  getUnavailableSubreddits,
+  isSubredditUnavailable,
+  isSubredditUnavailableStatus,
 } from '$lib/db/store';
 import { scanSubredditProfile, type SubredditProfileScanResult } from '$lib/discovery/subreddits';
 import { readRedditRateLimitState } from '$lib/transport/reddit';
 import type { SubredditRecord } from '$lib/types';
 
-type ProfileScanMode = 'idle' | 'background' | 'single' | 'batch' | 'full' | 'rescan' | 'failed';
+type ProfileScanMode =
+  | 'idle'
+  | 'background'
+  | 'single'
+  | 'batch'
+  | 'full'
+  | 'rescan'
+  | 'failed'
+  | 'unavailable'
+  | 'route';
 
 type EnqueueOptions = {
   mode: ProfileScanMode;
@@ -76,6 +88,13 @@ function writeStoredAutoEnabled(enabled: boolean): void {
 }
 
 function shouldShowInDueQueue(sub: SubredditRecord): boolean {
+  return !sub.isMuted
+    && sub.discoveryStatus !== 'muted'
+    && !isSubredditUnavailable(sub)
+    && isScanTargetName(sub.name);
+}
+
+function shouldShowInRecheckQueue(sub: SubredditRecord): boolean {
   return !sub.isMuted && sub.discoveryStatus !== 'muted' && isScanTargetName(sub.name);
 }
 
@@ -91,6 +110,7 @@ class ProfileScanManager {
   totalCount = $state(0);
   okCount = $state(0);
   failedCount = $state(0);
+  unavailableCount = $state(0);
   linksDiscovered = $state(0);
   lastResult = $state<SubredditProfileScanResult | null>(null);
   lastMessage = $state('');
@@ -151,6 +171,9 @@ class ProfileScanManager {
     if (this.active && this.currentName) return `scan r/${this.currentName}`;
     if (this.queue.length > 0) return `${this.queue.length} queued`;
     if (this.lastResult && this.now - this.lastActivityAt < RECENT_STATUS_MS) {
+      if (isSubredditUnavailableStatus(this.lastResult.availabilityStatus)) {
+        return `${this.lastResult.availabilityStatus} r/${this.lastResult.name}`;
+      }
       return this.lastResult.ok ? `scanned r/${this.lastResult.name}` : `scan failed`;
     }
     return 'scan';
@@ -166,6 +189,7 @@ class ProfileScanManager {
       `scanned: ${formatCount(this.scannedCount)}${this.totalCount > 0 ? `/${formatCount(this.totalCount)}` : ''}`,
       `ok: ${formatCount(this.okCount)}`,
       `failed: ${formatCount(this.failedCount)}`,
+      `unavailable: ${formatCount(this.unavailableCount)}`,
       `links: ${formatCount(this.linksDiscovered)}`,
     ];
 
@@ -177,6 +201,8 @@ class ProfileScanManager {
       parts.push(
         this.lastResult.ok
           ? `last: r/${this.lastResult.name} found ${this.lastResult.linksDiscovered} links`
+          : isSubredditUnavailableStatus(this.lastResult.availabilityStatus)
+            ? `last: r/${this.lastResult.name} marked ${this.lastResult.availabilityStatus}${this.lastResult.error ? ` (${this.lastResult.error})` : ''}`
           : `last: r/${this.lastResult.name} failed${this.lastResult.error ? ` (${this.lastResult.error})` : ''}`
       );
     } else {
@@ -249,6 +275,31 @@ class ProfileScanManager {
     await this.waitForCurrentRun();
   }
 
+  async scanUnavailable(): Promise<void> {
+    const unavailable = (await getUnavailableSubreddits())
+      .filter(shouldShowInRecheckQueue)
+      .sort((a, b) => (a.availabilityCheckedAt ?? 0) - (b.availabilityCheckedAt ?? 0));
+
+    this.enqueue(unavailable.map((sub) => sub.name), {
+      mode: 'unavailable',
+      replaceQueue: true,
+      total: unavailable.length,
+    });
+    await this.waitForCurrentRun();
+  }
+
+  async scanRouteMembers(names: string[]): Promise<void> {
+    const normalized = [...new Set(names.map(normalizeSubredditName).filter(isScanTargetName))];
+    if (normalized.length === 0) return;
+
+    this.enqueue(normalized, {
+      mode: 'route',
+      replaceQueue: !this.active || this.mode === 'background',
+      total: normalized.length,
+    });
+    await this.waitForCurrentRun();
+  }
+
   async enqueueBackgroundTargets(names: string[]): Promise<void> {
     if (!this.autoEnabled || this.paused) return;
 
@@ -260,6 +311,7 @@ class ProfileScanManager {
 
       const existing = await getSubreddit(name);
       if (!existing || existing.isMuted || existing.discoveryStatus === 'muted') continue;
+      if (isSubredditUnavailable(existing)) continue;
       if (existing.profileFetchedAt || existing.profileFetchError) continue;
 
       targets.push(name);
@@ -320,6 +372,7 @@ class ProfileScanManager {
     this.totalCount = total;
     this.okCount = 0;
     this.failedCount = 0;
+    this.unavailableCount = 0;
     this.linksDiscovered = 0;
     this.lastResult = null;
   }
@@ -400,6 +453,10 @@ class ProfileScanManager {
           this.okCount += 1;
           this.linksDiscovered += result.linksDiscovered;
           this.lastMessage = `Scanned r/${result.name}; ${result.linksDiscovered} links found.`;
+        } else if (isSubredditUnavailableStatus(result.availabilityStatus)) {
+          this.unavailableCount += 1;
+          this.failedCount += 1;
+          this.lastMessage = `Marked r/${result.name} ${result.availabilityStatus}${result.error ? `: ${result.error}` : ''}`;
         } else {
           this.failedCount += 1;
           this.lastMessage = `Failed r/${result.name}${result.error ? `: ${result.error}` : ''}`;

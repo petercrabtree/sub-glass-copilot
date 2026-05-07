@@ -21,7 +21,7 @@
     upsertPost, upsertSubreddit, upsertMedia, upsertAdjacency,
     markPostSeen, setPostRating, getPost, getSeenPostIds, addEvent,
     getSubreddit, updateSubredditRating, getFeedSnapshot, setFeedSnapshot,
-    getPostsByIds, getAllSubreddits,
+    getPostsByIds, getAllSubreddits, isSubredditUnavailable,
   } from '$lib/db/store';
   import { extractLinksFromPost } from '$lib/adjacency/extract';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
@@ -140,7 +140,10 @@
   let masonrySyncFrame = 0;
   let snapshotSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let lastRouteLoadKey = '';
-  let activeRouteKey = '';
+  let activeRouteKey = $state('');
+  let routeNotice = $state('');
+  let routeNoticeRouteKey = $state('');
+  const checkedRouteAvailabilityKeys = new Set<string>();
   let viewerUiEngaged = $state(false);
   let viewerUiDisengageTimer: ReturnType<typeof setTimeout> | undefined;
   let mediaCacheByUrl = $state<Record<string, boolean>>({});
@@ -700,6 +703,94 @@
     return `/r/${sub}${query ? `?${query}` : ''}`;
   }
 
+  function replaceRouteSubredditBundle(sub: string, subreddits: string[]) {
+    const slashIndex = sub.indexOf('/');
+    const suffix = slashIndex >= 0 ? sub.slice(slashIndex) : '';
+    const nextBundle = subreddits.length > 0 ? subreddits.join('+') : 'all';
+    return `${nextBundle}${suffix}`;
+  }
+
+  async function getKnownUnavailableRouteFilter(sub: string) {
+    const routeSubs = extractSubreddits(sub);
+    if (routeSubs.length === 0) return null;
+
+    const kept: string[] = [];
+    const removed: string[] = [];
+
+    for (const name of routeSubs) {
+      if (name === 'all') {
+        kept.push(name);
+        continue;
+      }
+
+      const record = await getSubreddit(name);
+      if (isSubredditUnavailable(record)) {
+        removed.push(name);
+      } else {
+        kept.push(name);
+      }
+    }
+
+    if (removed.length === 0) return null;
+
+    return {
+      removed,
+      sanitizedSub: replaceRouteSubredditBundle(sub, kept),
+    };
+  }
+
+  async function loadRouteFromParams(sub: string, time: string | undefined, roulette: boolean, routeKey: string) {
+    const filter = await getKnownUnavailableRouteFilter(sub);
+    if (routeKey !== lastRouteLoadKey) return;
+
+    if (filter && filter.sanitizedSub !== sub) {
+      const targetRouteKey = getFeedRouteKey(filter.sanitizedSub, time, roulette);
+      routeNotice = `Removed unavailable ${filter.removed.map((name) => `r/${name}`).join(', ')}`;
+      routeNoticeRouteKey = targetRouteKey;
+      await goto(getFeedPath(filter.sanitizedSub, time, roulette), { replaceState: true });
+      return;
+    }
+
+    subredditParam = sub;
+    listingTime = time;
+    pathInput = getFeedPath(sub, time, roulette);
+    loadFeed(sub, time, roulette);
+  }
+
+  function shouldCheckRouteMembersAfterListingError(sub: string, error: RedditRequestError) {
+    if (error.tooFast || error.kind !== 'http') return false;
+    if (error.status !== 403 && error.status !== 404) return false;
+    return extractSubreddits(sub).some((name) => name !== 'all');
+  }
+
+  async function recheckRouteMembersAfterListingError(
+    sub: string,
+    time: string | undefined,
+    roulette: boolean,
+    error: RedditRequestError
+  ) {
+    if (!shouldCheckRouteMembersAfterListingError(sub, error)) return false;
+
+    const routeKey = getFeedRouteKey(sub, time, roulette);
+    const checkKey = `${routeKey}:availability`;
+    if (checkedRouteAvailabilityKeys.has(checkKey)) return false;
+    checkedRouteAvailabilityKeys.add(checkKey);
+
+    const routeSubs = extractSubreddits(sub).filter((name) => name !== 'all');
+    routeNotice = `Checking ${routeSubs.length} subreddit profile${routeSubs.length === 1 ? '' : 's'} after feed failure`;
+    routeNoticeRouteKey = routeKey;
+    await profileScanManager.scanRouteMembers(routeSubs);
+
+    const filter = await getKnownUnavailableRouteFilter(sub);
+    if (!filter || filter.sanitizedSub === sub) return false;
+
+    const targetRouteKey = getFeedRouteKey(filter.sanitizedSub, time, roulette);
+    routeNotice = `Removed unavailable ${filter.removed.map((name) => `r/${name}`).join(', ')}`;
+    routeNoticeRouteKey = targetRouteKey;
+    await goto(getFeedPath(filter.sanitizedSub, time, roulette), { replaceState: true });
+    return true;
+  }
+
   function clampIndex(index: number, length: number) {
     if (length <= 0) return 0;
     return Math.min(length - 1, Math.max(0, Math.round(index)));
@@ -970,10 +1061,7 @@
     const routeKey = getFeedRouteKey(sub, time, roulette);
     if (routeKey === lastRouteLoadKey) return;
     lastRouteLoadKey = routeKey;
-    subredditParam = sub;
-    listingTime = time;
-    pathInput = getFeedPath(sub, time, roulette);
-    loadFeed(sub, time, roulette);
+    void loadRouteFromParams(sub, time, roulette, routeKey);
   });
 
   $effect(() => {
@@ -1099,6 +1187,10 @@
     syncRedditDebug();
     if (!result.ok) {
       console.error('Failed to load feed', result.error);
+      if (await recheckRouteMembersAfterListingError(sub, time, roulette, result.error)) {
+        loading = false;
+        return;
+      }
       if (!restored) {
         error = result.error;
       }
@@ -1956,6 +2048,9 @@
 	        <span class="roulette-chip">roulette {rouletteRoundProgress}/{rouletteSettings.imagesPerRound}</span>
 	      {/if}
 	      <ProfileScanStatus class="viewer-profile-scan-status" />
+	      {#if routeNotice && (!routeNoticeRouteKey || routeNoticeRouteKey === activeRouteKey)}
+	        <span class="route-notice-chip" title={routeNotice}>{routeNotice}</span>
+	      {/if}
 
 	      <details class="topbar-menu">
 	        <summary aria-label="Viewer menu">menu</summary>
@@ -2502,6 +2597,7 @@
   .mode-chip,
   .ui-mode-chip,
   .roulette-chip,
+  .route-notice-chip,
   .topbar-menu summary,
   .ui-reveal-button {
     display: inline-flex;
@@ -2541,6 +2637,18 @@
     background: rgba(94, 179, 128, 0.12);
     border-color: rgba(117, 217, 156, 0.18);
     font-variant-numeric: tabular-nums;
+  }
+
+  .route-notice-chip {
+    max-width: clamp(120px, 22vw, 300px);
+    justify-content: flex-start;
+    overflow: hidden;
+    padding: 0 8px;
+    color: rgba(244, 205, 158, 0.92);
+    background: rgba(188, 128, 67, 0.12);
+    border-color: rgba(224, 166, 104, 0.22);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .topbar-menu {

@@ -1,4 +1,5 @@
 import type { SubredditRecord, SubredditRouletteSettings } from '$lib/types';
+import { isSubredditUnavailable } from '$lib/db/store';
 
 export const DEFAULT_ROULETTE_SETTINGS: SubredditRouletteSettings = {
   subredditCount: 10,
@@ -203,6 +204,7 @@ function chooseWeightedSubredditIndex(
 function isRouletteCandidate(sub: SubredditRecord, settings: SubredditRouletteSettings): boolean {
   if (!sub.name || sub.name === 'all') return false;
   if (sub.isMuted || sub.discoveryStatus === 'muted') return false;
+  if (isSubredditUnavailable(sub)) return false;
   if (sub.discoveryStatus === 'failed') return false;
   if (settings.nsfwMode === 'only' && sub.isNsfw !== true) return false;
   if (settings.nsfwMode === 'no' && sub.isNsfw === true) return false;

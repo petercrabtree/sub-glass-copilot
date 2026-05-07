@@ -2,12 +2,13 @@ import { extractLinksFromDescription } from '$lib/adjacency/extract';
 import {
   getSubreddit,
   getSubredditsDueForProfileScan,
+  markSubredditUnavailable,
   markSubredditProfileFailed,
   upsertAdjacency,
   upsertSubreddit,
 } from '$lib/db/store';
 import { fetchSubredditAboutResult } from '$lib/transport/reddit';
-import type { AdjacencyLink, SubredditRecord } from '$lib/types';
+import type { AdjacencyLink, SubredditAvailabilityStatus, SubredditRecord } from '$lib/types';
 
 export interface SubredditProfileScanResult {
   name: string;
@@ -16,6 +17,7 @@ export interface SubredditProfileScanResult {
   error?: string;
   tooFast?: boolean;
   rateLimitedUntil?: number;
+  availabilityStatus?: SubredditAvailabilityStatus;
 }
 
 function normalizeSubredditName(name: string): string {
@@ -100,6 +102,11 @@ function extractProfileRecord(
     discoveryStatus: existing?.isMuted ? 'muted' : 'verified',
     profileFetchedAt: now,
     profileFetchError: undefined,
+    availabilityStatus: 'available',
+    availabilityCheckedAt: now,
+    availabilityReason: undefined,
+    availabilityDetail: undefined,
+    unavailableSince: undefined,
     adjacencyScannedAt: now,
   };
 }
@@ -137,6 +144,22 @@ export async function scanSubredditProfile(name: string): Promise<SubredditProfi
     }
 
     const error = response.error.message || 'subreddit profile fetch failed';
+    if (response.error.subredditUnavailableReason) {
+      await markSubredditUnavailable(
+        normalizedName,
+        response.error.subredditUnavailableReason,
+        error,
+        response.error.subredditUnavailableDetail
+      );
+      return {
+        name: normalizedName,
+        ok: false,
+        linksDiscovered: 0,
+        error,
+        availabilityStatus: response.error.subredditUnavailableReason,
+      };
+    }
+
     await markSubredditProfileFailed(normalizedName, error);
     return { name: normalizedName, ok: false, linksDiscovered: 0, error };
   }

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import type { SubredditRecord } from '$lib/types';
   import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
-  import { getAllSubreddits, getAdjacencyFrom } from '$lib/db/store';
+  import { getAllSubreddits, getAdjacencyFrom, isSubredditUnavailable } from '$lib/db/store';
   import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
 
   let subreddits = $state<SubredditRecord[]>([]);
@@ -20,7 +20,7 @@
 
   async function buildSuggestions(subs: SubredditRecord[]) {
     const scored = subs
-      .filter(s => !s.isMuted)
+      .filter(s => !s.isMuted && !isSubredditUnavailable(s))
       .sort((a, b) => b.localRating - a.localRating);
 
     const results: Array<{ name: string; reason: string; score: number; evidence?: string }> = [];
@@ -38,7 +38,7 @@
       for (const link of adj.sort((a, b) => (b.weight ?? b.count ?? 1) - (a.weight ?? a.count ?? 1)).slice(0, 5)) {
         if (!seen.has(link.toSubreddit)) {
           const adjSub = subs.find(s => s.name === link.toSubreddit);
-          if (!adjSub?.isMuted) {
+          if (!adjSub?.isMuted && !isSubredditUnavailable(adjSub)) {
             seen.add(link.toSubreddit);
             results.push({
               name: link.toSubreddit,
@@ -142,6 +142,9 @@
               {sub.localRating > 0 ? '+' : ''}{sub.localRating}
             </span>
             <span class="status">{sub.discoveryStatus ?? 'discovered'}</span>
+            {#if sub.availabilityStatus && sub.availabilityStatus !== 'available'}
+              <span class="status unavailable">{sub.availabilityStatus}</span>
+            {/if}
             {#if sub.subscribers}<span class="meta">{sub.subscribers.toLocaleString()} subs</span>{/if}
             {#if sub.profileFetchedAt}<span class="meta">scanned {new Date(sub.profileFetchedAt).toLocaleDateString()}</span>{/if}
             {#if sub.isMuted}<span class="muted-label">muted</span>{/if}
@@ -197,6 +200,7 @@
   .rating.positive { color: #6ab0de; }
   .rating.negative { color: #de6a6a; }
   .status, .meta { font-size: 0.74rem; color: #777; }
+  .status.unavailable { color: #de6a6a; }
   .muted-label { font-size: 0.7rem; color: #666; }
   .scan-one {
     background: #1d2f42; color: #d8e5ef; border: 1px solid #2b4054;

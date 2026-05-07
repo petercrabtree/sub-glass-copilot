@@ -1,5 +1,7 @@
 import type { FetchSpec } from '$lib/types';
 
+export type RedditSubredditUnavailableReason = 'banned' | 'private' | 'quarantined' | 'not_found';
+
 export interface RedditListingResponse {
   kind: string;
   data: {
@@ -27,6 +29,8 @@ export interface RedditRequestError {
   tooFast?: boolean;
   retryAfterMs?: number;
   rateLimitedUntil?: number;
+  subredditUnavailableReason?: RedditSubredditUnavailableReason;
+  subredditUnavailableDetail?: string;
 }
 
 export type RedditListingResult =
@@ -90,6 +94,87 @@ function summarizeResponseBody(body: string): string | undefined {
   const summary = body.replace(/\s+/g, ' ').trim();
   if (!summary) return undefined;
   return summary.slice(0, 400);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function normalizeUnavailableReason(value: unknown): RedditSubredditUnavailableReason | undefined {
+  const raw = asString(value)?.toLowerCase().replace(/[\s-]+/g, '_');
+  if (!raw) return undefined;
+  if (raw.includes('ban')) return 'banned';
+  if (raw.includes('private')) return 'private';
+  if (raw.includes('quarantine')) return 'quarantined';
+  if (raw === 'not_found' || raw === 'notfound' || raw.includes('not_found') || raw.includes('does_not_exist')) {
+    return 'not_found';
+  }
+  return undefined;
+}
+
+function parseErrorJson(body: string): Record<string, unknown> | undefined {
+  try {
+    return asRecord(JSON.parse(body));
+  } catch {
+    return undefined;
+  }
+}
+
+function findUnavailableReasonInJson(record: Record<string, unknown> | undefined): RedditSubredditUnavailableReason | undefined {
+  if (!record) return undefined;
+
+  const direct = normalizeUnavailableReason(record.reason)
+    ?? normalizeUnavailableReason(record.error)
+    ?? normalizeUnavailableReason(record.error_type);
+  if (direct) return direct;
+
+  const nested = asRecord(record.data) ?? asRecord(record.response);
+  return findUnavailableReasonInJson(nested);
+}
+
+function findErrorDetailInJson(record: Record<string, unknown> | undefined): string | undefined {
+  if (!record) return undefined;
+  return asString(record.message)
+    ?? asString(record.reason)
+    ?? asString(record.error)
+    ?? findErrorDetailInJson(asRecord(record.data))
+    ?? findErrorDetailInJson(asRecord(record.response));
+}
+
+function inferUnavailableReasonFromBody(body: string): RedditSubredditUnavailableReason | undefined {
+  const normalized = body.toLowerCase().replace(/\s+/g, ' ');
+  if (!normalized) return undefined;
+  if (normalized.includes('subreddit') && normalized.includes('banned')) return 'banned';
+  if (normalized.includes('private community') || normalized.includes('private subreddit')) return 'private';
+  if (normalized.includes('quarantined')) return 'quarantined';
+  if (
+    normalized.includes("there doesn't seem to be anything here")
+    || normalized.includes('page not found')
+    || normalized.includes('subreddit does not exist')
+  ) {
+    return 'not_found';
+  }
+  return undefined;
+}
+
+function classifyUnavailableResponse(
+  res: Response,
+  body: string
+): { reason?: RedditSubredditUnavailableReason; detail?: string } {
+  const parsed = parseErrorJson(body);
+  const reason = findUnavailableReasonInJson(parsed)
+    ?? inferUnavailableReasonFromBody(body)
+    ?? (res.status === 404 ? 'not_found' : undefined);
+
+  return {
+    reason,
+    detail: findErrorDetailInJson(parsed),
+  };
 }
 
 function formatErrorCause(error: unknown): string | undefined {
@@ -230,6 +315,7 @@ async function parseJsonResponse<T>(
   const responseSnippet = summarizeResponseBody(body);
 
   if (!res.ok) {
+    const unavailable = classifyUnavailableResponse(res, body);
     return {
       ok: false,
       error: {
@@ -245,6 +331,8 @@ async function parseJsonResponse<T>(
         tooFast: Boolean(rateLimitState?.active),
         retryAfterMs: rateLimitState?.retryAfterMs,
         rateLimitedUntil: rateLimitState?.until,
+        subredditUnavailableReason: unavailable.reason,
+        subredditUnavailableDetail: unavailable.detail,
       },
     };
   }

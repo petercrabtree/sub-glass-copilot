@@ -1,4 +1,11 @@
 export type SubredditDiscoveryStatus = 'discovered' | 'verified' | 'failed' | 'muted';
+export type SubredditAvailabilityStatus =
+  | 'available'
+  | 'banned'
+  | 'private'
+  | 'quarantined'
+  | 'not_found'
+  | 'unknown';
 
 export interface SubredditRecord {
   name: string;
@@ -19,6 +26,11 @@ export interface SubredditRecord {
   profileFetchedAt?: number;
   profileFetchFailedAt?: number;
   profileFetchError?: string;
+  availabilityStatus?: SubredditAvailabilityStatus;
+  availabilityCheckedAt?: number;
+  availabilityReason?: string;
+  availabilityDetail?: string;
+  unavailableSince?: number;
   adjacencyScannedAt?: number;
 }
 

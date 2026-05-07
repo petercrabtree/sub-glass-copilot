@@ -4,6 +4,7 @@
     getAllSubreddits, getAllPosts, getAllMedia, getAllEvents, getAllAdjacency,
     exportAllData, importAllData, getAllFeedSnapshots,
     setSubredditMuted, setSubredditRating, clearSubredditProfileFailure,
+    isSubredditUnavailable,
   } from '$lib/db/store';
   import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import {
@@ -37,6 +38,9 @@
   let sortedSubreddits = $derived([...subreddits].sort((a, b) => b.localRating - a.localRating));
   let editableSubreddits = $derived(
     [...subreddits].sort((a, b) => {
+      const aUnavailable = isSubredditUnavailable(a) ? 0 : 1;
+      const bUnavailable = isSubredditUnavailable(b) ? 0 : 1;
+      if (aUnavailable !== bUnavailable) return aUnavailable - bUnavailable;
       const aUnscanned = a.profileFetchedAt ? 1 : 0;
       const bUnscanned = b.profileFetchedAt ? 1 : 0;
       if (aUnscanned !== bUnscanned) return aUnscanned - bUnscanned;
@@ -45,9 +49,11 @@
   );
   let scanBusy = $derived(profileScanManager.active);
   let discoveryStats = $derived({
-    verified: subreddits.filter((sub) => sub.profileFetchedAt && !sub.isMuted).length,
-    unscanned: subreddits.filter((sub) => !sub.profileFetchedAt && !sub.isMuted && sub.name !== 'all').length,
-    failed: subreddits.filter((sub) => sub.discoveryStatus === 'failed' || sub.profileFetchError).length,
+    verified: subreddits.filter((sub) => sub.profileFetchedAt && !sub.isMuted && !isSubredditUnavailable(sub)).length,
+    unscanned: subreddits.filter((sub) => !sub.profileFetchedAt && !sub.isMuted && !isSubredditUnavailable(sub) && sub.name !== 'all').length,
+    failed: subreddits.filter((sub) => !isSubredditUnavailable(sub) && (sub.discoveryStatus === 'failed' || sub.profileFetchError)).length,
+    banned: subreddits.filter((sub) => sub.availabilityStatus === 'banned').length,
+    unavailable: subreddits.filter((sub) => isSubredditUnavailable(sub)).length,
     muted: subreddits.filter((sub) => sub.isMuted || sub.discoveryStatus === 'muted').length,
   });
 
@@ -192,6 +198,10 @@
 
   async function scanFailedProfiles() {
     await runDiscoveryAction(() => profileScanManager.scanFailed());
+  }
+
+  async function scanUnavailableProfiles() {
+    await runDiscoveryAction(() => profileScanManager.scanUnavailable());
   }
 
   async function rescanAllProfiles() {
@@ -451,6 +461,14 @@
                 <div class="stat-label">Failed</div>
               </div>
               <div class="stat-card">
+                <div class="stat-value">{discoveryStats.banned}</div>
+                <div class="stat-label">Banned</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{discoveryStats.unavailable}</div>
+                <div class="stat-label">Unavailable</div>
+              </div>
+              <div class="stat-card">
                 <div class="stat-value">{discoveryStats.muted}</div>
                 <div class="stat-label">Muted</div>
               </div>
@@ -473,6 +491,7 @@
                 <button class="action-btn" onclick={scanNextProfiles} disabled={scanBusy}>{scanBusy ? 'Scanning…' : 'Scan next 20'}</button>
                 <button class="action-btn" onclick={scanAllDueProfiles} disabled={scanBusy}>Full due scan</button>
                 <button class="action-btn" onclick={scanFailedProfiles} disabled={scanBusy}>Rescan failed</button>
+                <button class="action-btn" onclick={scanUnavailableProfiles} disabled={scanBusy}>Recheck unavailable</button>
                 <button class="action-btn action-btn--danger" onclick={rescanAllProfiles} disabled={scanBusy}>Force rescan all</button>
                 {#if profileScanManager.paused}
                   <button class="action-btn" onclick={() => profileScanManager.resume()}>Resume</button>
@@ -501,11 +520,20 @@
                     onchange={(event) => updateSubredditRatingFromInput(sub, event)}
                   />
                   <span class="field">{sub.discoveryStatus ?? 'discovered'}</span>
+                  {#if sub.availabilityStatus && sub.availabilityStatus !== 'available'}
+                    <span class="field" class:error={isSubredditUnavailable(sub)}>
+                      {sub.availabilityStatus}
+                    </span>
+                  {/if}
                   {#if sub.profileFetchedAt}
                     <span class="field meta">profile: {new Date(sub.profileFetchedAt).toLocaleString()}</span>
                   {:else}
                     <span class="field meta">profile: unscanned</span>
                   {/if}
+                  {#if sub.availabilityCheckedAt}
+                    <span class="field meta">availability: {new Date(sub.availabilityCheckedAt).toLocaleString()}</span>
+                  {/if}
+                  {#if sub.availabilityDetail}<span class="field error">{sub.availabilityDetail}</span>{/if}
                   {#if sub.profileFetchError}<span class="field error">{sub.profileFetchError}</span>{/if}
                   <label class="row-toggle">
                     <input
@@ -515,7 +543,9 @@
                     />
                     <span>muted</span>
                   </label>
-                  <button class="row-action" onclick={() => scanOneProfile(sub.name)} disabled={scanBusy}>scan</button>
+                  <button class="row-action" onclick={() => scanOneProfile(sub.name)} disabled={scanBusy}>
+                    {isSubredditUnavailable(sub) ? 'recheck' : 'scan'}
+                  </button>
                   {#if sub.profileFetchError}
                     <button class="row-action" onclick={() => clearSubredditFailure(sub)}>clear fail</button>
                   {/if}
@@ -531,6 +561,9 @@
                 <a href="/r/{sub.name}" class="sub-link">r/{sub.name}</a>
                 <span class="field">rating: <strong>{sub.localRating}</strong></span>
                 <span class="field">{sub.discoveryStatus ?? 'discovered'}</span>
+                {#if sub.availabilityStatus && sub.availabilityStatus !== 'available'}
+                  <span class="field error">{sub.availabilityStatus}</span>
+                {/if}
                 <span class="field">{sub.isMuted ? 'muted' : ''}</span>
                 {#if sub.subscribers}<span class="field meta">{sub.subscribers.toLocaleString()} subscribers</span>{/if}
                 {#if sub.profileFetchedAt}<span class="field meta">profile: {new Date(sub.profileFetchedAt).toLocaleString()}</span>{/if}
