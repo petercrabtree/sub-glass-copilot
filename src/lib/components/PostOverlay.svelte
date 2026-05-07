@@ -32,6 +32,7 @@
   let {
     post,
     chromeVisible = true,
+    showTopBar = true,
     uiMode = 'full',
     mediaIndex = 0,
     totalMedia = 1,
@@ -54,6 +55,7 @@
   }: {
     post: PostRecord;
     chromeVisible?: boolean;
+    showTopBar?: boolean;
     uiMode?: ViewerUiMode;
     mediaIndex?: number;
     totalMedia?: number;
@@ -251,159 +253,161 @@
   onfocusin={handleOverlayFocusIn}
   onfocusout={handleOverlayFocusOut}
 >
-  <!-- Top bar: counter + seen indicator -->
-  <div class="top-bar" class:visible={chromeVisible && uiMode !== 'hidden'}>
-    <span class="counter">{postIndex + 1} / {totalPosts}</span>
-    {#if totalMedia > 1}
-      <span class="gallery-counter">img {mediaIndex + 1}/{totalMedia}</span>
-    {/if}
-    {#if isSeen}
-      <span class="seen-badge">seen</span>
-    {/if}
-    <div class="top-bar-spacer"></div>
-    <span class="subreddit">r/{post.subreddit}</span>
-    <div class="utility-cluster">
-      {#if loadedMedia.length > 0}
-        <div class="hover-card-anchor">
-          <button
-            type="button"
-            class="load-cluster"
-            aria-label={`Loaded queue showing ${loadedMedia.length} items, ${describeLoadedMediaCacheMode()}`}
-          >
-            <span class="utility-label">queue</span>
-            <span class="load-summary">{loadedMedia.length}</span>
-            <span class="cache-summary" data-cache-mode={imageCacheMode}>
-              {describeLoadedMediaCacheMode()}
-            </span>
-            <span class="load-rail" aria-hidden="true">
-              {#each loadedMedia as item (item.id)}
-                <span
-                  class="load-chip"
-                  class:rating-up={item.rating === 1}
-                  class:rating-down={item.rating === -1}
-                  class:current={item.index === postIndex}
-                  data-kind={item.kind}
-                  data-status={item.status}
-                  data-cache={item.cacheState}
-                  title={describeLoadedMedia(item)}
-                ></span>
-              {/each}
-            </span>
-          </button>
-          <div class="hover-panel queue-panel">
-            <div class="queue-panel-header">
-              <div class="queue-panel-copy">
-                <p class="panel-title">Loaded Queue</p>
-                <p class="panel-copy">
-                  Jump to any loaded post and hover a row to peek at its preview image.
-                </p>
-              </div>
-              <div class="queue-panel-summary">
-                <span class="summary-pill">{loadedMedia.length} loaded</span>
-                <span class="summary-pill" data-cache-mode={imageCacheMode}>
-                  {describeLoadedMediaCacheMode()}
-                </span>
-              </div>
-            </div>
-            {#if imageCacheMode === 'inactive'}
-              <p class="panel-copy muted">
-                The image cache becomes inspectable once the service worker controls this page. If it still shows inactive, use the admin cache tools to register or refresh the worker.
-              </p>
-            {:else if imageCacheMode === 'unsupported'}
-              <p class="panel-copy muted">
-                This browser does not expose Cache Storage inspection here.
-              </p>
-            {/if}
-            <div class="queue-list" role="list" aria-label="Loaded media queue">
-              {#each loadedMedia as item (item.id)}
-                <div class="queue-item-shell" role="listitem">
-                  <button
-                    type="button"
-                    class="queue-item"
-                    data-current={item.index === postIndex}
+  {#if showTopBar}
+    <!-- Top bar: counter + seen indicator -->
+    <div class="top-bar" class:visible={chromeVisible && uiMode !== 'hidden'}>
+      <span class="counter">{postIndex + 1} / {totalPosts}</span>
+      {#if totalMedia > 1}
+        <span class="gallery-counter">img {mediaIndex + 1}/{totalMedia}</span>
+      {/if}
+      {#if isSeen}
+        <span class="seen-badge">seen</span>
+      {/if}
+      <div class="top-bar-spacer"></div>
+      <span class="subreddit">r/{post.subreddit}</span>
+      <div class="utility-cluster">
+        {#if loadedMedia.length > 0}
+          <div class="hover-card-anchor">
+            <button
+              type="button"
+              class="load-cluster"
+              aria-label={`Loaded queue showing ${loadedMedia.length} items, ${describeLoadedMediaCacheMode()}`}
+            >
+              <span class="utility-label">queue</span>
+              <span class="load-summary">{loadedMedia.length}</span>
+              <span class="cache-summary" data-cache-mode={imageCacheMode}>
+                {describeLoadedMediaCacheMode()}
+              </span>
+              <span class="load-rail" aria-hidden="true">
+                {#each loadedMedia as item (item.id)}
+                  <span
+                    class="load-chip"
+                    class:rating-up={item.rating === 1}
+                    class:rating-down={item.rating === -1}
+                    class:current={item.index === postIndex}
+                    data-kind={item.kind}
                     data-status={item.status}
                     data-cache={item.cacheState}
-                    aria-current={item.index === postIndex ? 'true' : undefined}
-                    aria-label={`Jump to ${describeLoadedMedia(item)}`}
-                    title={`Jump to ${describeLoadedMedia(item)}`}
-                    onclick={() => onselectLoadedMedia?.(item.index)}
-                    onmouseenter={() => previewLoadedMediaItem(item.id)}
-                    onmouseleave={() => previewLoadedMediaItem(null)}
-                    onfocus={() => previewLoadedMediaItem(item.id)}
-                    onblur={() => previewLoadedMediaItem(null)}
-                  >
-                    <span class="queue-item-leading">
-                      <span
-                        class="load-chip"
-                        class:rating-up={item.rating === 1}
-                        class:rating-down={item.rating === -1}
-                        class:current={item.index === postIndex}
-                        data-kind={item.kind}
-                        data-status={item.status}
-                        data-cache={item.cacheState}
-                      ></span>
-                      <span class="queue-index">{item.index + 1}</span>
-                    </span>
-                    <span class="queue-item-copy">
-                      <span class="queue-item-title">{item.title}</span>
-                      <span class="queue-item-meta">
-                        {formatLoadedMediaKind(item.kind)} · {item.status}
-                        {#if item.itemCount > 1}
-                          · {item.itemCount} items
-                        {/if}
-                        {#if item.rating === 1}
-                          · rated up
-                        {:else if item.rating === -1}
-                          · rated down
-                        {/if}
-                      </span>
-                    </span>
-                    <span class="queue-item-badges">
-                      {#if item.index === postIndex}
-                        <span class="queue-badge current">now</span>
-                      {/if}
-                      <span class="queue-badge cache" data-cache={item.cacheState}>
-                        {formatLoadedMediaCacheState(item.cacheState)}
-                      </span>
-                    </span>
-                    {#if previewedLoadItemId === item.id && item.previewUrl}
-                      <span class="queue-preview-popover">
-                        <img
-                          src={item.previewUrl}
-                          alt={`Preview for ${item.title}`}
-                          class="queue-preview-image"
-                          loading="lazy"
-                        />
-                      </span>
-                    {/if}
-                  </button>
+                    title={describeLoadedMedia(item)}
+                  ></span>
+                {/each}
+              </span>
+            </button>
+            <div class="hover-panel queue-panel">
+              <div class="queue-panel-header">
+                <div class="queue-panel-copy">
+                  <p class="panel-title">Loaded Queue</p>
+                  <p class="panel-copy">
+                    Jump to any loaded post and hover a row to peek at its preview image.
+                  </p>
                 </div>
-              {/each}
+                <div class="queue-panel-summary">
+                  <span class="summary-pill">{loadedMedia.length} loaded</span>
+                  <span class="summary-pill" data-cache-mode={imageCacheMode}>
+                    {describeLoadedMediaCacheMode()}
+                  </span>
+                </div>
+              </div>
+              {#if imageCacheMode === 'inactive'}
+                <p class="panel-copy muted">
+                  The image cache becomes inspectable once the service worker controls this page. If it still shows inactive, use the admin cache tools to register or refresh the worker.
+                </p>
+              {:else if imageCacheMode === 'unsupported'}
+                <p class="panel-copy muted">
+                  This browser does not expose Cache Storage inspection here.
+                </p>
+              {/if}
+              <div class="queue-list" role="list" aria-label="Loaded media queue">
+                {#each loadedMedia as item (item.id)}
+                  <div class="queue-item-shell" role="listitem">
+                    <button
+                      type="button"
+                      class="queue-item"
+                      data-current={item.index === postIndex}
+                      data-status={item.status}
+                      data-cache={item.cacheState}
+                      aria-current={item.index === postIndex ? 'true' : undefined}
+                      aria-label={`Jump to ${describeLoadedMedia(item)}`}
+                      title={`Jump to ${describeLoadedMedia(item)}`}
+                      onclick={() => onselectLoadedMedia?.(item.index)}
+                      onmouseenter={() => previewLoadedMediaItem(item.id)}
+                      onmouseleave={() => previewLoadedMediaItem(null)}
+                      onfocus={() => previewLoadedMediaItem(item.id)}
+                      onblur={() => previewLoadedMediaItem(null)}
+                    >
+                      <span class="queue-item-leading">
+                        <span
+                          class="load-chip"
+                          class:rating-up={item.rating === 1}
+                          class:rating-down={item.rating === -1}
+                          class:current={item.index === postIndex}
+                          data-kind={item.kind}
+                          data-status={item.status}
+                          data-cache={item.cacheState}
+                        ></span>
+                        <span class="queue-index">{item.index + 1}</span>
+                      </span>
+                      <span class="queue-item-copy">
+                        <span class="queue-item-title">{item.title}</span>
+                        <span class="queue-item-meta">
+                          {formatLoadedMediaKind(item.kind)} · {item.status}
+                          {#if item.itemCount > 1}
+                            · {item.itemCount} items
+                          {/if}
+                          {#if item.rating === 1}
+                            · rated up
+                          {:else if item.rating === -1}
+                            · rated down
+                          {/if}
+                        </span>
+                      </span>
+                      <span class="queue-item-badges">
+                        {#if item.index === postIndex}
+                          <span class="queue-badge current">now</span>
+                        {/if}
+                        <span class="queue-badge cache" data-cache={item.cacheState}>
+                          {formatLoadedMediaCacheState(item.cacheState)}
+                        </span>
+                      </span>
+                      {#if previewedLoadItemId === item.id && item.previewUrl}
+                        <span class="queue-preview-popover">
+                          <img
+                            src={item.previewUrl}
+                            alt={`Preview for ${item.title}`}
+                            class="queue-preview-image"
+                            loading="lazy"
+                          />
+                        </span>
+                      {/if}
+                    </button>
+                  </div>
+                {/each}
+              </div>
             </div>
           </div>
-        </div>
-      {/if}
-      <div class="hover-card-anchor">
-        <button type="button" class="help-chip" aria-label="Keyboard shortcuts">
-          <span class="utility-label">keys</span>
-        </button>
-        <div class="hover-panel shortcuts-panel">
-          <p class="panel-title">Keyboard</p>
-          {#each VIEWER_SHORTCUT_GROUPS as group}
-            <div class="shortcut-group">
-              <p class="shortcut-group-title">{group.title}</p>
-              {#each group.shortcuts as shortcut}
-                <div class="shortcut-row">
-                  <span class="shortcut-copy">{shortcut.description}</span>
-                  <span class="shortcut-keys">{shortcut.displayKeys.join(' / ')}</span>
-                </div>
-              {/each}
-            </div>
-          {/each}
+        {/if}
+        <div class="hover-card-anchor">
+          <button type="button" class="help-chip" aria-label="Keyboard shortcuts">
+            <span class="utility-label">keys</span>
+          </button>
+          <div class="hover-panel shortcuts-panel">
+            <p class="panel-title">Keyboard</p>
+            {#each VIEWER_SHORTCUT_GROUPS as group}
+              <div class="shortcut-group">
+                <p class="shortcut-group-title">{group.title}</p>
+                {#each group.shortcuts as shortcut}
+                  <div class="shortcut-row">
+                    <span class="shortcut-copy">{shortcut.description}</span>
+                    <span class="shortcut-keys">{shortcut.displayKeys.join(' / ')}</span>
+                  </div>
+                {/each}
+              </div>
+            {/each}
+          </div>
         </div>
       </div>
     </div>
-  </div>
+  {/if}
 
   <!-- Bottom info bar -->
   <div class="bottom-bar" class:visible={chromeVisible && uiMode !== 'hidden'}>

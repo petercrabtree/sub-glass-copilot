@@ -1435,6 +1435,7 @@
             <PostOverlay
               post={currentPost}
               uiMode={viewerUiMode}
+              showTopBar={false}
               mediaIndex={galleryIndex}
               totalMedia={totalItems}
               postIndex={currentIndex}
@@ -1674,6 +1675,7 @@
               <PostOverlay
                 post={currentPost}
                 uiMode={viewerUiMode}
+                showTopBar={false}
                 mediaIndex={galleryIndex}
                 totalMedia={totalItems}
                 postIndex={currentIndex}
@@ -1799,7 +1801,6 @@
 	        <details class="status-menu">
 	          <summary aria-label={`Loaded queue showing ${loadedMediaStates.length} items, ${loadedMediaCacheSummary}`}>
 	            <span class="status-label">queue</span>
-	            <span class="load-summary">{loadedMediaStates.length}</span>
 	            <span class="load-rail" aria-hidden="true">
 	              {#each loadedMediaStates as item (item.id)}
 	                <span
@@ -2402,6 +2403,16 @@
       box-shadow 220ms ease,
       backdrop-filter 220ms ease,
       transform 220ms ease;
+  }
+
+  .debug-dock:not([open]):not(.has-error) {
+    width: max-content;
+    max-width: calc(100vw - 20px);
+  }
+
+  .debug-dock[open],
+  .debug-dock.has-error {
+    width: min(300px, calc(100vw - 20px));
   }
 
   .debug-dock.has-error {
@@ -3188,7 +3199,11 @@
     }
 
     .debug-dock:not([open]):not(.has-error):not(:hover):not(:focus-within) .debug-state {
+      max-width: 0;
       opacity: 0;
+      overflow: hidden;
+      padding-inline: 0;
+      border-color: transparent;
     }
 
     .scroll-slide-meta,
@@ -3410,7 +3425,6 @@
   .status-subreddit,
   .status-menu summary,
   .status-label,
-  .load-summary,
   .auto-dock-toggle,
   .auto-advance-title {
     display: inline-flex;
@@ -3428,13 +3442,11 @@
   .status-count,
   .status-subreddit,
   .status-label,
-  .load-summary,
   .auto-advance-title {
     padding: 0 8px;
   }
 
   .status-count,
-  .load-summary,
   .auto-dock-toggle {
     font-variant-numeric: tabular-nums;
   }
@@ -3445,11 +3457,15 @@
 
   .status-menu {
     position: static;
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .status-menu summary {
     list-style: none;
     gap: 6px;
+    width: 100%;
+    min-width: 0;
     padding: 0 8px;
     cursor: pointer;
   }
@@ -3469,12 +3485,16 @@
   .load-rail {
     display: inline-flex;
     align-items: center;
+    flex: 1 1 auto;
     gap: 4px;
+    min-width: 32px;
+    overflow: hidden;
   }
 
   .load-chip {
     position: relative;
     display: inline-flex;
+    flex: 0 0 auto;
     width: 8px;
     height: 16px;
     border-radius: 999px;
@@ -3669,6 +3689,7 @@
   .debug-dock {
     top: 37px;
     right: 0;
+    bottom: auto;
     border-radius: 0 0 0 16px;
   }
 
@@ -3752,14 +3773,14 @@
     }
 
     .status-menu summary {
-      max-width: 136px;
+      max-width: none;
       overflow: hidden;
     }
 
     .status-menu-panel {
       left: 0;
-      right: auto;
-      width: 100vw;
+      right: 0;
+      width: auto;
       grid-template-columns: 1fr;
       border-radius: 0 0 14px 14px;
     }
