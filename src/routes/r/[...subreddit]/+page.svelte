@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
+  import { ExternalLink, Image as ImageIcon, ThumbsDown, ThumbsUp } from 'lucide-svelte';
   import type { FeedSnapshot, MediaGroup, MediaItem, MediaKind, PostRecord, SubredditRouletteSettings } from '$lib/types';
   import { fetchListing, readRedditDebugState } from '$lib/transport/reddit';
   import type { RedditDebugState, RedditRequestError } from '$lib/transport/reddit';
@@ -1832,22 +1833,56 @@
               onfocusin={engageViewerUi}
               onfocusout={handleViewerSurfaceFocusOut}
             >
-              <p class="selection-kicker">{currentDisplayMode.blurb}</p>
+              <p class="selection-subreddit">r/{currentPost.subreddit}</p>
               <p class="selection-title">{currentPost.title}</p>
+              <p class="selection-kicker">{currentDisplayMode.blurb}</p>
               <p class="selection-meta">
                 <span>{currentIndex + 1} / {posts.length}</span>
-                <span>r/{currentPost.subreddit}</span>
                 <span>{currentPost.score} pts</span>
                 {#if totalItems > 1}
                   <span>{galleryIndex + 1} / {totalItems} in set</span>
                 {/if}
               </p>
-              <div class="selection-actions">
-                <button type="button" class="selection-action" class:active={currentPost.localRating === 1} onclick={() => rateUp()}>👍</button>
-                <button type="button" class="selection-action" class:active={currentPost.localRating === -1} onclick={() => rateDown()}>👎</button>
-                <button type="button" class="selection-action" onclick={() => openReddit()}>Reddit</button>
-                <button type="button" class="selection-action" onclick={() => openMedia()}>Media</button>
-              </div>
+            </div>
+            <div
+              class="selection-actions"
+              role="group"
+              aria-label="Current post actions"
+              onpointerenter={engageViewerUi}
+              onpointerleave={releaseViewerUiSoon}
+              onfocusin={engageViewerUi}
+              onfocusout={handleViewerSurfaceFocusOut}
+            >
+              <button
+                type="button"
+                class="selection-action"
+                class:active={currentPost.localRating === 1}
+                title={`Thumbs up (${getViewerShortcut('rate_up_next').displayKeys.join(' / ')} rates and advances)`}
+                aria-label="Rate up"
+                onclick={() => rateUp()}
+              ><ThumbsUp size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+              <button
+                type="button"
+                class="selection-action"
+                class:active={currentPost.localRating === -1}
+                title={`Thumbs down (${getViewerShortcut('rate_down_next').displayKeys.join(' / ')} rates and advances)`}
+                aria-label="Rate down"
+                onclick={() => rateDown()}
+              ><ThumbsDown size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+              <button
+                type="button"
+                class="selection-action"
+                title={`Open on Reddit (${getViewerShortcut('open_reddit').displayKeys.join(' / ')})`}
+                aria-label="Open Reddit post"
+                onclick={() => openReddit()}
+              ><ExternalLink size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+              <button
+                type="button"
+                class="selection-action"
+                title={`Open media (${getViewerShortcut('open_media').displayKeys.join(' / ')})`}
+                aria-label="Open media URL"
+                onclick={() => openMedia()}
+              ><ImageIcon size={16} strokeWidth={1.9} aria-hidden="true" /></button>
             </div>
           {/if}
         {:else if displayMode === 'masonry'}
@@ -1917,6 +1952,8 @@
               onfocusin={engageViewerUi}
               onfocusout={handleViewerSurfaceFocusOut}
             >
+              <p class="selection-subreddit">r/{currentPost.subreddit}</p>
+              <p class="selection-title">{currentPost.title}</p>
               <p class="selection-kicker">
                 {#if masonryAutoPaused}
                   auto-scroll paused
@@ -1924,18 +1961,50 @@
                   auto-scroll cruising
                 {/if}
               </p>
-              <p class="selection-title">{currentPost.title}</p>
               <p class="selection-meta">
                 <span>{currentIndex + 1} / {posts.length}</span>
-                <span>r/{currentPost.subreddit}</span>
                 <span>{currentPost.score} pts</span>
               </p>
-              <div class="selection-actions">
-                <button type="button" class="selection-action" class:active={currentPost.localRating === 1} onclick={() => rateUp()}>👍</button>
-                <button type="button" class="selection-action" class:active={currentPost.localRating === -1} onclick={() => rateDown()}>👎</button>
-                <button type="button" class="selection-action" onclick={() => openReddit()}>Reddit</button>
-                <button type="button" class="selection-action" onclick={() => openMedia()}>Media</button>
-              </div>
+            </div>
+            <div
+              class="selection-actions"
+              role="group"
+              aria-label="Current masonry selection actions"
+              onpointerenter={engageViewerUi}
+              onpointerleave={releaseViewerUiSoon}
+              onfocusin={engageViewerUi}
+              onfocusout={handleViewerSurfaceFocusOut}
+            >
+              <button
+                type="button"
+                class="selection-action"
+                class:active={currentPost.localRating === 1}
+                title={`Thumbs up (${getViewerShortcut('rate_up_next').displayKeys.join(' / ')} rates and advances)`}
+                aria-label="Rate up"
+                onclick={() => rateUp()}
+              ><ThumbsUp size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+              <button
+                type="button"
+                class="selection-action"
+                class:active={currentPost.localRating === -1}
+                title={`Thumbs down (${getViewerShortcut('rate_down_next').displayKeys.join(' / ')} rates and advances)`}
+                aria-label="Rate down"
+                onclick={() => rateDown()}
+              ><ThumbsDown size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+              <button
+                type="button"
+                class="selection-action"
+                title={`Open on Reddit (${getViewerShortcut('open_reddit').displayKeys.join(' / ')})`}
+                aria-label="Open Reddit post"
+                onclick={() => openReddit()}
+              ><ExternalLink size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+              <button
+                type="button"
+                class="selection-action"
+                title={`Open media (${getViewerShortcut('open_media').displayKeys.join(' / ')})`}
+                aria-label="Open media URL"
+                onclick={() => openMedia()}
+              ><ImageIcon size={16} strokeWidth={1.9} aria-hidden="true" /></button>
             </div>
           {/if}
         {:else if displayMode === 'wild' || displayMode === 'wild2' || displayMode === 'wild3'}
@@ -3217,6 +3286,10 @@
     backdrop-filter: blur(10px);
   }
 
+  .selection-meta span {
+    background: rgba(9, 12, 16, 0.18);
+  }
+
   .scroll-slide[data-active='true'] .scroll-media {
     outline: 2px solid rgba(140, 199, 239, 0.52);
     outline-offset: 4px;
@@ -3225,17 +3298,17 @@
   .selection-card {
     position: absolute;
     left: 10px;
-    bottom: 10px;
+    top: 48px;
     z-index: 18;
-    width: min(320px, calc(100vw - 20px));
+    width: min(380px, calc(100vw - 20px));
     display: grid;
-    gap: 6px;
-    padding: 10px 11px;
+    gap: 5px;
+    padding: 9px 10px;
     border-radius: 16px;
-    background: rgba(9, 12, 16, 0.32);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    backdrop-filter: blur(16px) saturate(0.92);
-    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.18);
+    background: rgba(9, 12, 16, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.055);
+    backdrop-filter: blur(18px) saturate(0.94);
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.14);
     transition:
       opacity 220ms ease,
       background 220ms ease,
@@ -3245,8 +3318,32 @@
       transform 220ms ease;
   }
 
+  .selection-card:hover,
+  .selection-card:focus-within,
+  .selection-actions:hover,
+  .selection-actions:focus-within {
+    background: rgba(9, 12, 16, 0.32);
+    border-color: rgba(255, 255, 255, 0.09);
+  }
+
   .selection-card--masonry {
-    background: rgba(9, 11, 16, 0.36);
+    background: rgba(9, 11, 16, 0.18);
+  }
+
+  .selection-subreddit {
+    width: fit-content;
+    max-width: 100%;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(140, 199, 239, 0.1);
+    border: 1px solid rgba(140, 199, 239, 0.13);
+    color: rgba(158, 216, 250, 0.94);
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .selection-kicker {
@@ -3288,27 +3385,56 @@
   }
 
   .selection-actions {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    z-index: 19;
     display: flex;
-    gap: 6px;
+    gap: 5px;
     flex-wrap: wrap;
-    max-height: 48px;
+    max-height: none;
+    padding: 6px;
+    border-radius: 16px;
+    background: rgba(9, 12, 16, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.055);
+    backdrop-filter: blur(18px) saturate(0.94);
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.14);
     overflow: hidden;
     transition:
       opacity 220ms ease,
-      max-height 220ms ease,
+      background 220ms ease,
+      border-color 220ms ease,
+      box-shadow 220ms ease,
       transform 220ms ease,
       filter 220ms ease;
   }
 
   .selection-action {
-    padding: 6px 10px;
-    border-radius: 999px;
-    font-size: 0.76rem;
-    min-width: 40px;
+    width: 32px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 10px;
+    color: rgba(229, 241, 250, 0.82);
+    cursor: pointer;
   }
 
   .selection-action.active {
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.24);
+    background: rgba(106, 176, 222, 0.18);
+    border-color: rgba(106, 176, 222, 0.34);
+    color: rgba(182, 224, 252, 0.98);
+    box-shadow: none;
+  }
+
+  .selection-action:focus-visible {
+    outline: 2px solid rgba(106, 176, 222, 0.75);
+    outline-offset: 2px;
+  }
+
+  .selection-action :global(svg) {
+    display: block;
   }
 
   .masonry-feed {
@@ -3685,28 +3811,23 @@
   }
 
   .viewer-page[data-ui-mode='mini'] .selection-card {
-    width: min(250px, calc(100vw - 20px));
+    width: min(300px, calc(100vw - 20px));
     gap: 4px;
     padding: 8px;
-    opacity: 0.84;
+    opacity: 0.78;
   }
 
-  .viewer-page[data-ui-mode='mini'] .selection-meta,
-  .viewer-page[data-ui-mode='mini'] .selection-actions {
+  .viewer-page[data-ui-mode='mini'] .selection-meta {
     max-height: 0;
     opacity: 0;
     transform: translateY(4px);
-    pointer-events: none;
   }
 
   .viewer-page[data-ui-mode='mini'] .selection-card:hover .selection-meta,
-  .viewer-page[data-ui-mode='mini'] .selection-card:focus-within .selection-meta,
-  .viewer-page[data-ui-mode='mini'] .selection-card:hover .selection-actions,
-  .viewer-page[data-ui-mode='mini'] .selection-card:focus-within .selection-actions {
+  .viewer-page[data-ui-mode='mini'] .selection-card:focus-within .selection-meta {
     max-height: 48px;
     opacity: 1;
     transform: translateY(0);
-    pointer-events: auto;
   }
 
   .viewer-page[data-ui-mode='mini'] .selection-title {
@@ -3714,6 +3835,10 @@
     -webkit-line-clamp: 1;
     line-clamp: 1;
     max-height: 24px;
+  }
+
+  .viewer-page[data-ui-mode='mini'] .selection-kicker {
+    display: none;
   }
 
   .viewer-page[data-ui-mode='mini'] .selection-card:hover .selection-title,
@@ -3729,6 +3854,7 @@
 
   .viewer-page[data-ui-mode='hidden'] .topbar,
   .viewer-page[data-ui-mode='hidden'] .selection-card,
+  .viewer-page[data-ui-mode='hidden'] .selection-actions,
   .viewer-page[data-ui-mode='hidden'] .debug-dock,
   .viewer-page[data-ui-mode='hidden'] .feed-loading-indicator {
     opacity: 0;
@@ -3839,6 +3965,11 @@
 
     .selection-card {
       width: min(300px, calc(100vw - 16px));
+      left: 8px;
+      top: 74px;
+    }
+
+    .selection-actions {
       left: 8px;
       bottom: 8px;
     }
@@ -4275,7 +4406,17 @@
 
   .selection-card {
     left: 0;
+    top: 37px;
+    border-left: 0;
+    border-top: 0;
+    border-radius: 0 0 16px 0;
+  }
+
+  .selection-actions {
+    left: 0;
     bottom: 0;
+    border-left: 0;
+    border-bottom: 0;
     border-radius: 0 16px 0 0;
   }
 
@@ -4288,6 +4429,7 @@
   .viewer-page[data-ui-mode='hidden'] .topbar,
   .viewer-page[data-ui-mode='hidden'] .viewer-status,
   .viewer-page[data-ui-mode='hidden'] .selection-card,
+  .viewer-page[data-ui-mode='hidden'] .selection-actions,
   .viewer-page[data-ui-mode='hidden'] .feed-loading-indicator {
     opacity: 0;
     pointer-events: none;
@@ -4370,7 +4512,15 @@
     }
 
     .selection-card {
-      width: min(260px, 58vw);
+      top: 74px;
+      width: min(280px, calc(100vw - 44px));
+      border-radius: 0 0 14px 0;
+    }
+
+    .selection-actions {
+      left: 0;
+      bottom: 0;
+      border-radius: 0 14px 0 0;
     }
   }
 </style>

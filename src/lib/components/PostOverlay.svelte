@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ExternalLink, Image as ImageIcon, ThumbsDown, ThumbsUp } from 'lucide-svelte';
   import type { MediaKind, PostRecord } from '$lib/types';
   import type { MediaCacheRuntimeState, MediaCacheState } from '$lib/service-worker/media-cache';
   import {
@@ -409,44 +410,47 @@
     </div>
   {/if}
 
-  <!-- Bottom info bar -->
-  <div class="bottom-bar" class:visible={chromeVisible && uiMode !== 'hidden'}>
-    <div class="post-info">
-      <p class="post-title">{post.title}</p>
-      <p class="post-meta">
-        <span>by u/{post.author}</span>
-        <span>· {post.score} pts</span>
-        {#if post.flair}<span class="flair">· {post.flair}</span>{/if}
-      </p>
-    </div>
-    <div class="controls">
-      <button
-        class="btn-icon"
-        class:active={rating === 1}
-        onclick={() => onrateUp?.()}
-        title={`Thumbs up (${rateUpShortcut} rates and advances)`}
-        aria-label="Rate up"
-      >👍</button>
-      <button
-        class="btn-icon"
-        class:active={rating === -1}
-        onclick={() => onrateDown?.()}
-        title={`Thumbs down (${rateDownShortcut} rates and advances)`}
-        aria-label="Rate down"
-      >👎</button>
-      <button
-        class="btn-icon"
-        onclick={() => onopenReddit?.()}
-        title={`Open on Reddit (${redditShortcut})`}
-        aria-label="Open Reddit post"
-      >🔗</button>
-      <button
-        class="btn-icon"
-        onclick={() => onopenMedia?.()}
-        title={`Open media (${mediaShortcut})`}
-        aria-label="Open media URL"
-      >🖼️</button>
-    </div>
+  <div class="post-details" class:visible={chromeVisible && uiMode !== 'hidden'}>
+    <p class="post-subreddit">r/{post.subreddit}</p>
+    <p class="post-title">{post.title}</p>
+    <p class="post-meta">
+      <span>{postIndex + 1} / {totalPosts}</span>
+      {#if totalMedia > 1}
+        <span>img {mediaIndex + 1}/{totalMedia}</span>
+      {/if}
+      <span>by u/{post.author}</span>
+      <span>{post.score} pts</span>
+      {#if post.flair}<span class="flair">{post.flair}</span>{/if}
+    </p>
+  </div>
+
+  <div class="action-dock" class:visible={chromeVisible && uiMode !== 'hidden'}>
+    <button
+      class="btn-icon"
+      class:active={rating === 1}
+      onclick={() => onrateUp?.()}
+      title={`Thumbs up (${rateUpShortcut} rates and advances)`}
+      aria-label="Rate up"
+    ><ThumbsUp size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+    <button
+      class="btn-icon"
+      class:active={rating === -1}
+      onclick={() => onrateDown?.()}
+      title={`Thumbs down (${rateDownShortcut} rates and advances)`}
+      aria-label="Rate down"
+    ><ThumbsDown size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+    <button
+      class="btn-icon"
+      onclick={() => onopenReddit?.()}
+      title={`Open on Reddit (${redditShortcut})`}
+      aria-label="Open Reddit post"
+    ><ExternalLink size={16} strokeWidth={1.9} aria-hidden="true" /></button>
+    <button
+      class="btn-icon"
+      onclick={() => onopenMedia?.()}
+      title={`Open media (${mediaShortcut})`}
+      aria-label="Open media URL"
+    ><ImageIcon size={16} strokeWidth={1.9} aria-hidden="true" /></button>
   </div>
 
   <div class="nav-grid" role="group" aria-label="Overlay navigation">
@@ -491,7 +495,8 @@
   }
 
   .top-bar,
-  .bottom-bar {
+  .post-details,
+  .action-dock {
     pointer-events: none;
     opacity: 0;
     transition:
@@ -506,10 +511,10 @@
     position: absolute;
     z-index: 3;
     border-radius: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(8, 11, 15, 0.52);
-    backdrop-filter: blur(20px) saturate(1.05);
-    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.055);
+    background: rgba(8, 11, 15, 0.16);
+    backdrop-filter: blur(18px) saturate(0.94);
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.14);
   }
 
   .top-bar {
@@ -520,31 +525,42 @@
     transform: translateY(-4px);
   }
 
-  .bottom-bar {
+  .post-details {
+    left: 10px;
+    top: 48px;
+    width: min(380px, calc(100vw - 20px));
+    padding: 9px 10px;
+    display: grid;
+    align-items: start;
+    gap: 5px;
+    transform: translateY(-4px);
+  }
+
+  .action-dock {
     left: 10px;
     bottom: 10px;
-    width: min(340px, calc(100vw - 20px));
-    padding: 8px;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
+    padding: 6px;
+    gap: 5px;
     transform: translateY(4px);
   }
 
   .top-bar.visible,
-  .bottom-bar.visible {
-    opacity: 0.94;
+  .post-details.visible,
+  .action-dock.visible {
+    opacity: 0.88;
     pointer-events: auto;
     transform: translateY(0);
   }
 
   .top-bar:hover,
   .top-bar:focus-within,
-  .bottom-bar:hover,
-  .bottom-bar:focus-within {
-    opacity: 1;
-    background: rgba(8, 11, 15, 0.74);
-    border-color: rgba(255, 255, 255, 0.12);
+  .post-details:hover,
+  .post-details:focus-within,
+  .action-dock:hover,
+  .action-dock:focus-within {
+    opacity: 0.98;
+    background: rgba(8, 11, 15, 0.32);
+    border-color: rgba(255, 255, 255, 0.09);
   }
 
   .counter,
@@ -927,13 +943,24 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     white-space: nowrap;
   }
-  .post-info {
-    width: 100%;
-    min-width: 0;
+  .post-subreddit {
+    width: fit-content;
+    max-width: 100%;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(140, 199, 239, 0.1);
+    border: 1px solid rgba(140, 199, 239, 0.13);
+    color: rgba(158, 216, 250, 0.94);
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .post-title {
-    font-size: 0.78rem;
+    font-size: 0.82rem;
     font-weight: 500;
     color: #edf6ff;
     line-height: 1.3;
@@ -947,8 +974,7 @@
 
   .post-meta {
     font-size: 0.68rem;
-    color: #9daab7;
-    margin-top: 4px;
+    color: rgba(172, 186, 199, 0.78);
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
@@ -961,39 +987,40 @@
 
   .flair { color: #aaa; }
 
-  .controls {
-    display: flex;
-    gap: 6px;
-    transition:
-      opacity 0.2s ease,
-      max-height 0.2s ease,
-      transform 0.2s ease;
-  }
-
   .btn-icon {
-    min-width: 30px;
-    min-height: 28px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    padding: 0 8px;
+    width: 32px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.075);
+    padding: 0;
     border-radius: 10px;
-    font-size: 0.82rem;
-    color: #e0e0e0;
+    color: rgba(229, 241, 250, 0.82);
     pointer-events: all;
+    cursor: pointer;
     transition:
       background 0.15s ease,
       border-color 0.15s ease,
+      color 0.15s ease,
       transform 0.15s ease;
   }
 
   .btn-icon:hover {
-    background: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.105);
     border-color: rgba(255, 255, 255, 0.14);
+    color: #edf6ff;
   }
 
   .btn-icon.active {
-    background: rgba(106, 176, 222, 0.22);
-    border-color: rgba(106, 176, 222, 0.36);
+    background: rgba(106, 176, 222, 0.18);
+    border-color: rgba(106, 176, 222, 0.34);
+    color: rgba(182, 224, 252, 0.98);
+  }
+
+  .btn-icon :global(svg) {
+    display: block;
   }
   .nav-grid {
     position: absolute;
@@ -1094,9 +1121,10 @@
     display: none;
   }
 
-  .overlay[data-ui-mode='mini'] .bottom-bar {
-    width: min(250px, calc(100vw - 20px));
-    opacity: 0.82;
+  .overlay[data-ui-mode='mini'] .post-details {
+    width: min(300px, calc(100vw - 20px));
+    opacity: 0.78;
+    gap: 4px;
   }
 
   .overlay[data-ui-mode='mini'] .post-title {
@@ -1104,29 +1132,24 @@
     line-clamp: 1;
   }
 
-  .overlay[data-ui-mode='mini'] .post-meta,
-  .overlay[data-ui-mode='mini'] .controls {
+  .overlay[data-ui-mode='mini'] .post-meta {
     max-height: 0;
     opacity: 0;
     transform: translateY(4px);
-    pointer-events: none;
     overflow: hidden;
   }
 
-  .overlay[data-ui-mode='mini'] .bottom-bar:hover .post-title,
-  .overlay[data-ui-mode='mini'] .bottom-bar:focus-within .post-title {
+  .overlay[data-ui-mode='mini'] .post-details:hover .post-title,
+  .overlay[data-ui-mode='mini'] .post-details:focus-within .post-title {
     -webkit-line-clamp: 2;
     line-clamp: 2;
   }
 
-  .overlay[data-ui-mode='mini'] .bottom-bar:hover .post-meta,
-  .overlay[data-ui-mode='mini'] .bottom-bar:focus-within .post-meta,
-  .overlay[data-ui-mode='mini'] .bottom-bar:hover .controls,
-  .overlay[data-ui-mode='mini'] .bottom-bar:focus-within .controls {
+  .overlay[data-ui-mode='mini'] .post-details:hover .post-meta,
+  .overlay[data-ui-mode='mini'] .post-details:focus-within .post-meta {
     max-height: 72px;
     opacity: 1;
     transform: translateY(0);
-    pointer-events: auto;
   }
 
   .overlay[data-ui-mode='mini'] .nav-zone {
@@ -1146,7 +1169,8 @@
   }
 
   .overlay[data-ui-mode='hidden'] .top-bar,
-  .overlay[data-ui-mode='hidden'] .bottom-bar,
+  .overlay[data-ui-mode='hidden'] .post-details,
+  .overlay[data-ui-mode='hidden'] .action-dock,
   .overlay[data-ui-mode='hidden'] .nav-grid {
     opacity: 0;
     pointer-events: none;
@@ -1239,11 +1263,11 @@
       display: none;
     }
 
-    .overlay[data-ui-mode='mini'] .bottom-bar {
+    .overlay[data-ui-mode='mini'] .post-details {
       left: 8px;
-      bottom: 8px;
-      width: min(210px, calc(52vw - 8px));
-      padding: 7px;
+      top: 74px;
+      width: min(260px, calc(100vw - 16px));
+      padding: 8px 9px;
     }
 
     .overlay[data-ui-mode='mini'] .post-title {
@@ -1262,7 +1286,8 @@
     }
 
     .overlay[data-ui-mode='hidden'] .top-bar,
-    .overlay[data-ui-mode='hidden'] .bottom-bar,
+    .overlay[data-ui-mode='hidden'] .post-details,
+    .overlay[data-ui-mode='hidden'] .action-dock,
     .overlay[data-ui-mode='hidden'] .nav-grid {
       display: none;
     }
@@ -1272,20 +1297,34 @@
     display: none !important;
   }
 
-  .bottom-bar {
+  .post-details {
+    left: 0;
+    top: 37px;
+    width: min(390px, calc(100vw - 44px));
+    border-left: 0;
+    border-top: 0;
+    border-radius: 0 0 16px 0;
+  }
+
+  .action-dock {
     left: 0;
     bottom: 0;
-    width: min(360px, calc(100vw - 44px));
     border-left: 0;
     border-bottom: 0;
     border-radius: 0 16px 0 0;
   }
 
-  .overlay[data-ui-mode='mini'] .bottom-bar {
+  .overlay[data-ui-mode='mini'] .post-details {
+    left: 0;
+    top: 37px;
+    width: min(300px, calc(56vw - 4px));
+    opacity: 0.78;
+  }
+
+  .overlay[data-ui-mode='mini'] .action-dock {
     left: 0;
     bottom: 0;
-    width: min(260px, calc(58vw - 4px));
-    opacity: 0.86;
+    opacity: 0.82;
   }
 
   .nav-grid {
@@ -1367,11 +1406,18 @@
   }
 
   @media (max-width: 720px) {
-    .bottom-bar,
-    .overlay[data-ui-mode='mini'] .bottom-bar {
+    .post-details,
+    .overlay[data-ui-mode='mini'] .post-details {
+      left: 0;
+      top: 74px;
+      width: min(280px, calc(100vw - 44px));
+      border-radius: 0 0 14px 0;
+    }
+
+    .action-dock,
+    .overlay[data-ui-mode='mini'] .action-dock {
       left: 0;
       bottom: 0;
-      width: min(230px, 58vw);
       border-radius: 0 14px 0 0;
     }
 

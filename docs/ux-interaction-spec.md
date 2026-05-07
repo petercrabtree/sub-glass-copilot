@@ -117,7 +117,8 @@ The media itself. It should never feel like invisible controls are scattered acr
 The always-relevant controls:
 
 - top bar
-- context dock
+- post details panel
+- action dock
 - primary navigation gutters
 
 ### 3. Secondary inspect surfaces
@@ -222,28 +223,41 @@ Rules:
 
 The top bar should feel like a cockpit shelf, not a startled animal.
 
-#### Context Dock
+#### Post Details Panel
 
-Viewer routes should use one bottom-left context dock as the source of truth for:
+Viewer routes should use one top-left details panel, tucked below the top rail, as the source of truth for:
 
 - current title
 - subreddit and metadata
-- rating actions
-- outbound actions
 - mode or state kicker
 
 Rules:
 
-- Compact state keeps the kicker, title, and at least the primary actions visible.
+- Compact state keeps the subreddit and title visible.
 - Hover or focus expands detail density.
-- Hover should never make the title or primary actions disappear.
-- Scroll, masonry, and wild modes should use the same context dock family, even if the styling differs slightly.
+- Hover should never make the title disappear.
+- Scroll, masonry, and wild modes should use the same details panel family, even if the styling differs slightly.
 
-The user should learn one place for "what am I looking at and what can I do with it?"
+The user should learn one place for "what am I looking at?"
+
+#### Action Dock
+
+Viewer routes should keep one bottom-left action dock for:
+
+- rating actions
+- outbound actions
+
+Rules:
+
+- Compact state keeps the primary actions visible.
+- Actions should use icon buttons with accessible labels and tooltips.
+- Hover or focus can enrich affordance, but should not hide or move the buttons.
+
+The user should learn one place for "what can I do with it?"
 
 #### Pace Dock
 
-Auto-next belongs in its own dock, but it should behave like a sibling of the context dock.
+Auto-next belongs in its own dock, but it should behave like a sibling of the details panel and action dock.
 
 Rules:
 
@@ -307,7 +321,7 @@ Expected mouse behavior:
 - hovering a slide may enrich metadata presentation
 - the active slide is determined by viewport position, not by hover
 - clicking a slide selects it
-- context dock mirrors the active slide
+- the details panel and action dock mirror the active slide
 - no hidden edge navigation should compete with the scroll gesture
 
 ### Masonry Mode
@@ -333,7 +347,7 @@ Expected mouse behavior:
 - peripheral cards behave like browse targets
 - hovering a card lifts it and reveals its caption
 - clicking a card selects it
-- primary navigation still comes from explicit edge gutters and the shared context dock
+- primary navigation still comes from explicit edge gutters while details and actions stay in their shared panels
 - decorative motion never changes hit target placement
 
 Wild should mean bold composition, not unpredictable controls.
@@ -361,7 +375,7 @@ The viewer can be cinematic. Utility pages should be honest.
 - No timer reset tied to generic mouse jitter.
 - No essential action available only through hover reveal.
 - No layout shift caused purely by hover.
-- No separate reveal logic for top bar, context dock, pace dock, and debug dock unless there is a strong reason.
+- No separate reveal logic for top bar, details panel, action dock, pace dock, and debug dock unless there is a strong reason.
 
 ## Recommended Event Strategy
 
@@ -401,7 +415,7 @@ If this is implemented incrementally, the highest-value order is:
 
 1. Replace proximity-based navigation inference with explicit gutters.
 2. Stop resetting auto-next from generic viewer mouse movement.
-3. Unify top bar, context dock, and auto-next dock under one compact/expanded state model.
+3. Unify top bar, details panel, action dock, and auto-next dock under one compact/expanded state model.
 4. Make help and legend surfaces stable on hover, focus, and click.
 5. Keep utility routes visually aligned, but behaviorally conventional.
 

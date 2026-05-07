@@ -27,6 +27,7 @@
 	},
 	"dependencies": {
 		"@sveltejs/adapter-static": "^3.0.10",
-		"idb": "^8.0.3"
+		"idb": "^8.0.3",
+		"lucide-svelte": "^1.0.1"
 	}
 }
