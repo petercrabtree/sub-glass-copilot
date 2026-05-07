@@ -201,7 +201,7 @@
       <section class="round-panel">
         <div class="section-heading">
           <h2>Next Round</h2>
-          <span>{selected.length} subs / {settings.imagesPerRound} images</span>
+          <span>{selected.length}/{settings.subredditCount} subs · {settings.imagesPerRound} images</span>
         </div>
         {#if selected.length > 0}
           <div class="bundle-path">/r/{selectedBundle}</div>

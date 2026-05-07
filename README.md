@@ -25,7 +25,7 @@ Open http://localhost:5173 in your browser.
 - **Fullscreen media feed** — browse Reddit images, videos, and galleries in a distraction-free viewer
 - **Keyboard navigation** — Arrow keys / HJKL / Space to advance; gallery-aware (within-gallery then advance)
 - **Supported routes** — `/r/<subreddit>`, `/r/all`, `/r/<sub1+sub2>`, `/`
-- **Roulette mode** — `/roulette` builds NSFW-centric weighted random `/r/sub1+sub2+...` rounds from known subreddits, defaulting to 10 subreddits, 25 images, and NSFW-only candidates, with controls for liked/new/random balance and NSFW yes/no/only mode
+- **Roulette mode** — `/roulette` builds NSFW-centric weighted random `/r/sub1+sub2+...` rounds from known subreddits, defaulting to 10 subreddits, 25 images, and NSFW-only candidates, with liked/new/random controls acting as a relative selection mix and NSFW yes/no/only mode
 - **Media types** — Reddit-hosted images (`i.redd.it`), Reddit videos (`v.redd.it`), Reddit galleries, best-effort external images
 - **Seen state** — persisted forever; small "seen" badge on revisited posts
 - **Local ratings** — thumbs up/down per post (SubGlass-only, never sent to Reddit)

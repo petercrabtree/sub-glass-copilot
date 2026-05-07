@@ -11,9 +11,11 @@ export const DEFAULT_ROULETTE_SETTINGS: SubredditRouletteSettings = {
 
 export const ROULETTE_SETTINGS_STORAGE_KEY = 'subglass:roulette-settings';
 type NsfwMode = SubredditRouletteSettings['nsfwMode'];
+type RouletteWeightKind = 'liked' | 'new' | 'random';
 type StoredRouletteSettings = Partial<SubredditRouletteSettings> & {
   includeNsfw?: boolean;
 };
+const ROULETTE_WEIGHT_KINDS: RouletteWeightKind[] = ['liked', 'new', 'random'];
 
 function clampNumber(value: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback;
@@ -101,18 +103,101 @@ function getPreferenceScore(sub: SubredditRecord): number {
   return 0.7;
 }
 
+function getRouletteWeightValue(settings: SubredditRouletteSettings, kind: RouletteWeightKind): number {
+  if (kind === 'liked') return settings.likedWeight;
+  if (kind === 'new') return settings.newWeight;
+  return settings.randomWeight;
+}
+
+function getRouletteWeightTotal(settings: SubredditRouletteSettings): number {
+  return ROULETTE_WEIGHT_KINDS.reduce(
+    (total, kind) => total + getRouletteWeightValue(settings, kind),
+    0
+  );
+}
+
+function getStrategyCandidateWeight(sub: SubredditRecord, kind: RouletteWeightKind): number {
+  if (kind === 'liked') return getPreferenceScore(sub);
+  if (kind === 'new') return getNewnessScore(sub);
+  return 1;
+}
+
 export function getRouletteCandidateWeight(
   sub: SubredditRecord,
   settings: SubredditRouletteSettings
 ): number {
-  const preference = getPreferenceScore(sub);
-  const newness = getNewnessScore(sub);
-  const base =
-    settings.randomWeight +
-    settings.likedWeight * preference +
-    settings.newWeight * newness;
+  const totalWeight = getRouletteWeightTotal(settings);
+
+  if (totalWeight <= 0) return 1;
+
+  const base = ROULETTE_WEIGHT_KINDS.reduce((score, kind) => {
+    const relativeWeight = getRouletteWeightValue(settings, kind) / totalWeight;
+    return score + relativeWeight * getStrategyCandidateWeight(sub, kind);
+  }, 0);
 
   return Math.max(0.01, base);
+}
+
+function getRouletteSelectionSlots(
+  settings: SubredditRouletteSettings,
+  targetCount: number
+): RouletteWeightKind[] {
+  if (targetCount <= 0) return [];
+
+  const weightedKinds = ROULETTE_WEIGHT_KINDS
+    .map((kind, index) => ({ kind, index, weight: getRouletteWeightValue(settings, kind) }))
+    .filter((entry) => entry.weight > 0);
+
+  if (weightedKinds.length === 0) {
+    return Array.from({ length: targetCount }, () => 'random');
+  }
+
+  const totalWeight = weightedKinds.reduce((total, entry) => total + entry.weight, 0);
+  const quotas = weightedKinds.map((entry) => {
+    const exactSlots = (entry.weight / totalWeight) * targetCount;
+    const slots = Math.floor(exactSlots);
+    return {
+      ...entry,
+      slots,
+      remainder: exactSlots - slots,
+    };
+  });
+  let unassignedSlots = targetCount - quotas.reduce((total, quota) => total + quota.slots, 0);
+
+  quotas
+    .sort((a, b) => b.remainder - a.remainder || b.weight - a.weight || a.index - b.index)
+    .forEach((quota) => {
+      if (unassignedSlots <= 0) return;
+      quota.slots += 1;
+      unassignedSlots -= 1;
+    });
+
+  const slots = quotas.flatMap((quota) => Array.from({ length: quota.slots }, () => quota.kind));
+
+  for (let index = slots.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [slots[index], slots[swapIndex]] = [slots[swapIndex], slots[index]];
+  }
+
+  return slots;
+}
+
+function chooseWeightedSubredditIndex(
+  candidates: SubredditRecord[],
+  kind: RouletteWeightKind
+): number {
+  const totalWeight = candidates.reduce(
+    (sum, sub) => sum + Math.max(0.01, getStrategyCandidateWeight(sub, kind)),
+    0
+  );
+  let cursor = Math.random() * totalWeight;
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    cursor -= Math.max(0.01, getStrategyCandidateWeight(candidates[index], kind));
+    if (cursor <= 0) return index;
+  }
+
+  return 0;
 }
 
 function isRouletteCandidate(sub: SubredditRecord, settings: SubredditRouletteSettings): boolean {
@@ -138,28 +223,18 @@ export function chooseRouletteSubreddits(
 ): SubredditRecord[] {
   const settings = normalizeRouletteSettings(settingsInput);
   const avoid = new Set(avoidNames.map((name) => name.toLowerCase()));
-  const preferredPool = getRouletteCandidates(subreddits, settings).filter((sub) => !avoid.has(sub.name));
+  const preferredPool = getRouletteCandidates(subreddits, settings).filter(
+    (sub) => !avoid.has(sub.name.toLowerCase())
+  );
   const fallbackPool = getRouletteCandidates(subreddits, settings);
   const pool = preferredPool.length >= settings.subredditCount ? preferredPool : fallbackPool;
+  const targetCount = Math.min(settings.subredditCount, pool.length);
+  const selectionSlots = getRouletteSelectionSlots(settings, targetCount);
   const selected: SubredditRecord[] = [];
   const remaining = [...pool];
 
-  while (selected.length < settings.subredditCount && remaining.length > 0) {
-    const totalWeight = remaining.reduce(
-      (sum, sub) => sum + getRouletteCandidateWeight(sub, settings),
-      0
-    );
-    let cursor = Math.random() * totalWeight;
-    let selectedIndex = 0;
-
-    for (let index = 0; index < remaining.length; index += 1) {
-      cursor -= getRouletteCandidateWeight(remaining[index], settings);
-      if (cursor <= 0) {
-        selectedIndex = index;
-        break;
-      }
-    }
-
+  for (const slot of selectionSlots) {
+    const selectedIndex = chooseWeightedSubredditIndex(remaining, slot);
     const [sub] = remaining.splice(selectedIndex, 1);
     selected.push(sub);
   }
