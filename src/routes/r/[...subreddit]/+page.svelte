@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
-  import { ExternalLink, Image as ImageIcon, ThumbsDown, ThumbsUp } from 'lucide-svelte';
+  import { ExternalLink, Image as ImageIcon, Plus, ThumbsDown, ThumbsUp, X } from 'lucide-svelte';
   import type { FeedSnapshot, MediaGroup, MediaItem, MediaKind, PostRecord, SubredditRouletteSettings } from '$lib/types';
   import { fetchListing, readRedditDebugState } from '$lib/transport/reddit';
   import type { RedditDebugState, RedditRequestError } from '$lib/transport/reddit';
@@ -179,6 +179,11 @@
   let rouletteSettings = $state<SubredditRouletteSettings>(DEFAULT_ROULETTE_SETTINGS);
   let rouletteTransitioning = $state(false);
   let rouletteMessage = $state('');
+  let routeEditorOpen = $state(false);
+  let routeDraftSubreddits = $state<string[]>(['all']);
+  let routeDraftInput = $state('');
+  let routeDraftSort = $state<RouteListingSort>('hot');
+  let routeDraftTime = $state<RouteListingTime>(DEFAULT_ROULETTE_SETTINGS.listingTime);
 
   function formatErrorJson(feedError: RedditRequestError): string {
     return JSON.stringify(feedError, null, 2);
@@ -882,6 +887,61 @@
       : undefined;
   }
 
+  function normalizeRouteSubredditName(value: string): string | undefined {
+    const name = value
+      .trim()
+      .replace(/^\/?r\//i, '')
+      .replace(/^u\//i, '')
+      .toLowerCase();
+
+    if (!name) return undefined;
+    if (name === 'all') return 'all';
+    return /^[a-z0-9_]+$/.test(name) ? name : undefined;
+  }
+
+  function parseRouteSubredditInput(value: string): string[] {
+    return value
+      .split(/[,+\s]+/)
+      .map((part) => normalizeRouteSubredditName(part))
+      .filter((name): name is string => Boolean(name));
+  }
+
+  function normalizeRouteSubredditList(names: string[]): string[] {
+    const normalized = names
+      .map((name) => normalizeRouteSubredditName(name))
+      .filter((name): name is string => Boolean(name));
+    const concreteNames = normalized.filter((name) => name !== 'all');
+    const routeNames = concreteNames.length > 0 ? concreteNames : ['all'];
+    return [...new Set(routeNames)];
+  }
+
+  function getDraftSubreddits(includePendingInput = false) {
+    return normalizeRouteSubredditList([
+      ...routeDraftSubreddits,
+      ...(includePendingInput ? parseRouteSubredditInput(routeDraftInput) : []),
+    ]);
+  }
+
+  function getRouteSubredditParam(subreddits: string[], sort: RouteListingSort) {
+    const bundle = normalizeRouteSubredditList(subreddits)
+      .filter((name) => name !== 'all')
+      .join('+') || 'all';
+    return sort === 'hot' ? bundle : `${bundle}/${sort}`;
+  }
+
+  function getRoutePathFromParts(
+    subreddits: string[],
+    sort: RouteListingSort,
+    time: RouteListingTime,
+    roulette: boolean
+  ) {
+    return getFeedPath(
+      getRouteSubredditParam(subreddits, sort),
+      isTimedRouletteListingSort(sort) ? time : undefined,
+      roulette
+    );
+  }
+
   function formatRouteTargetSummary(sub: string) {
     const routeSubs = extractSubreddits(sub).filter((name) => name !== 'all');
     if (routeSubs.length === 0) return 'r/all';
@@ -911,6 +971,20 @@
     }
 
     return parts.join(' · ');
+  }
+
+  function formatRouteDraftSubredditCount(subreddits: string[]) {
+    const routeSubs = normalizeRouteSubredditList(subreddits).filter((name) => name !== 'all');
+    if (routeSubs.length === 0) return 'r/all';
+    if (routeSubs.length === 1) return `r/${routeSubs[0]}`;
+    return `${routeSubs.length} subs`;
+  }
+
+  function syncRouteDraftFromCurrentRoute() {
+    routeDraftSubreddits = normalizeRouteSubredditList(extractSubreddits(subredditParam));
+    routeDraftInput = '';
+    routeDraftSort = getRouteListingSort(subredditParam);
+    routeDraftTime = getRouteListingTime(listingTime) ?? rouletteSettings.listingTime;
   }
 
   function getFeedRouteKey(sub: string, time: string | undefined, roulette: boolean) {
@@ -1124,12 +1198,29 @@
     DISPLAY_MODES.find((mode) => mode.id === displayMode) ?? DISPLAY_MODES[0]
   );
   const activeSubredditBundle = $derived(extractSubreddits(subredditParam).filter((name) => name !== 'all'));
+  const activeRoutePath = $derived(getFeedPath(subredditParam || 'all', listingTime, isRouletteMode));
   const routeSummary = $derived(
     formatRouteSummary(subredditParam, listingTime, isRouletteMode, rouletteSettings.imagesPerRound)
   );
   const routeSummaryTitle = $derived(
-    `${routeSummary}${pathInput ? ` · ${pathInput}` : ''}`
+    `${routeSummary} · ${activeRoutePath}`
   );
+  const routeDraftListedSubreddits = $derived(getDraftSubreddits(false));
+  const routeDraftSubredditsWithPending = $derived(getDraftSubreddits(true));
+  const routeDraftSortUsesTime = $derived(isTimedRouletteListingSort(routeDraftSort));
+  const routeDraftPath = $derived(
+    getRoutePathFromParts(routeDraftSubredditsWithPending, routeDraftSort, routeDraftTime, isRouletteMode)
+  );
+  const routeDraftSummary = $derived(
+    formatRouteSummary(
+      getRouteSubredditParam(routeDraftSubredditsWithPending, routeDraftSort),
+      routeDraftSortUsesTime ? routeDraftTime : undefined,
+      isRouletteMode,
+      rouletteSettings.imagesPerRound
+    )
+  );
+  const routeDraftChanged = $derived(routeDraftPath !== activeRoutePath);
+  const routeDraftHasPendingInput = $derived(parseRouteSubredditInput(routeDraftInput).length > 0);
   const rouletteRoundProgress = $derived(
     Math.min(currentIndex + 1, rouletteSettings.imagesPerRound)
   );
@@ -1588,6 +1679,58 @@
       updateRouletteSettings({ listingSort: value as SubredditRouletteSettings['listingSort'] });
     } else {
       updateRouletteSettings({ listingTime: value as SubredditRouletteSettings['listingTime'] });
+    }
+  }
+
+  function handleRouteEditorToggle(event: Event) {
+    const nextOpen = (event.currentTarget as HTMLDetailsElement).open;
+    routeEditorOpen = nextOpen;
+    if (nextOpen) {
+      syncRouteDraftFromCurrentRoute();
+    }
+  }
+
+  function handleRouteDraftSortInput(event: Event) {
+    routeDraftSort = (event.currentTarget as HTMLSelectElement).value as RouteListingSort;
+  }
+
+  function handleRouteDraftTimeInput(event: Event) {
+    routeDraftTime = (event.currentTarget as HTMLSelectElement).value as RouteListingTime;
+  }
+
+  function addRouteDraftSubreddits(event?: Event) {
+    event?.preventDefault();
+    if (!routeDraftHasPendingInput) return;
+
+    routeDraftSubreddits = getDraftSubreddits(true);
+    routeDraftInput = '';
+  }
+
+  function removeRouteDraftSubreddit(name: string) {
+    routeDraftSubreddits = normalizeRouteSubredditList(
+      routeDraftSubreddits.filter((candidate) => candidate !== name)
+    );
+  }
+
+  function resetRouteDraft() {
+    syncRouteDraftFromCurrentRoute();
+  }
+
+  function cancelRouteDraft() {
+    syncRouteDraftFromCurrentRoute();
+    routeEditorOpen = false;
+  }
+
+  async function applyRouteDraft() {
+    const nextSubreddits = routeDraftSubredditsWithPending;
+    const nextPath = routeDraftPath;
+
+    routeDraftSubreddits = nextSubreddits;
+    routeDraftInput = '';
+    routeEditorOpen = false;
+
+    if (nextPath !== activeRoutePath) {
+      await goto(nextPath);
     }
   }
 
@@ -2612,9 +2755,85 @@
 	          </div>
 	        </div>
 	      </details>
-	      <span class="route-chip" title={routeSummaryTitle} aria-label={`Current route: ${routeSummary}`}>
-	        {routeSummary}
-	      </span>
+	      <details class="route-editor" bind:open={routeEditorOpen} ontoggle={handleRouteEditorToggle}>
+	        <summary class="route-chip" title={routeSummaryTitle} aria-label={`Edit current route: ${routeSummary}`}>
+	          <span>{routeSummary}</span>
+	        </summary>
+	        <div class="route-editor-panel" role="group" aria-label="Edit current route">
+	          <div class="route-editor-heading">
+	            <span>route</span>
+	            <strong title={routeDraftPath}>{routeDraftSummary}</strong>
+	          </div>
+
+	          <div class="route-subreddit-list" aria-label="Subreddits in route">
+	            {#if routeDraftListedSubreddits.length === 1 && routeDraftListedSubreddits[0] === 'all'}
+	              <span class="route-sub-pill route-sub-pill--static">r/all</span>
+	            {:else}
+	              {#each routeDraftListedSubreddits as name (name)}
+	                <span class="route-sub-pill">
+	                  <span>r/{name}</span>
+	                  <button
+	                    type="button"
+	                    class="route-remove-button"
+	                    aria-label={`Remove r/${name}`}
+	                    onclick={() => removeRouteDraftSubreddit(name)}
+	                  >
+	                    <X size={13} strokeWidth={2.2} aria-hidden="true" />
+	                  </button>
+	                </span>
+	              {/each}
+	            {/if}
+	          </div>
+
+	          <form class="route-add-form" onsubmit={addRouteDraftSubreddits}>
+	            <input
+	              type="text"
+	              bind:value={routeDraftInput}
+	              placeholder="add subreddit"
+	              autocomplete="off"
+	              spellcheck="false"
+	              aria-label="Add subreddit to route"
+	            />
+	            <button type="submit" disabled={!routeDraftHasPendingInput} aria-label="Add subreddit">
+	              <Plus size={15} strokeWidth={2.1} aria-hidden="true" />
+	            </button>
+	          </form>
+
+	          <div class="route-editor-grid">
+	            <label class="route-editor-setting">
+	              <span>sort</span>
+	              <select value={routeDraftSort} onchange={handleRouteDraftSortInput}>
+	                {#each ROULETTE_LISTING_SORTS as sort}
+	                  <option value={sort}>{sort}</option>
+	                {/each}
+	              </select>
+	            </label>
+	            <label class="route-editor-setting">
+	              <span>time</span>
+	              <select
+	                value={routeDraftTime}
+	                disabled={!routeDraftSortUsesTime}
+	                onchange={handleRouteDraftTimeInput}
+	              >
+	                {#each ROULETTE_LISTING_TIMES as time}
+	                  <option value={time}>{time}</option>
+	                {/each}
+	              </select>
+	            </label>
+	          </div>
+
+	          <div class="route-editor-footer">
+	            <span title={routeDraftPath}>{formatRouteDraftSubredditCount(routeDraftSubredditsWithPending)}</span>
+	            <div class="route-editor-actions">
+	              <button type="button" onclick={resetRouteDraft}>Reset</button>
+	              <button type="button" onclick={cancelRouteDraft}>Cancel</button>
+	              <button type="button" class="primary" onclick={applyRouteDraft} disabled={!routeDraftChanged}>
+	                Apply
+	              </button>
+	            </div>
+	          </div>
+	        </div>
+	      </details>
 	      {#if isRouletteMode}
 	        <span class="roulette-chip">roulette {rouletteRoundProgress}/{rouletteSettings.imagesPerRound}</span>
 	      {/if}
@@ -3064,6 +3283,21 @@
     line-height: 1;
   }
 
+  .route-editor {
+    position: relative;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .route-editor summary {
+    list-style: none;
+    cursor: pointer;
+  }
+
+  .route-editor summary::-webkit-details-marker {
+    display: none;
+  }
+
   .route-chip {
     max-width: clamp(130px, 24vw, 320px);
     justify-content: flex-start;
@@ -3071,6 +3305,148 @@
     padding: 0 9px;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .route-chip span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .route-editor[open] .route-chip,
+  .route-chip:hover,
+  .route-chip:focus-visible {
+    background: rgba(140, 199, 239, 0.14);
+    border-color: rgba(140, 199, 239, 0.24);
+    color: #edf6ff;
+  }
+
+  .route-editor-panel {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    z-index: 54;
+    width: min(420px, calc(100vw - 16px));
+    display: grid;
+    gap: 10px;
+    padding: 10px;
+    border-radius: 16px;
+    background: rgba(8, 11, 15, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(22px) saturate(1.08);
+    box-shadow: 0 24px 58px rgba(0, 0, 0, 0.36);
+  }
+
+  .route-editor-heading,
+  .route-editor-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .route-editor-heading > span,
+  .route-editor-footer > span {
+    flex: 0 0 auto;
+    color: rgba(166, 178, 190, 0.86);
+    font-size: 0.66rem;
+    text-transform: uppercase;
+  }
+
+  .route-editor-heading strong {
+    min-width: 0;
+    overflow: hidden;
+    color: #edf5fc;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .route-subreddit-list {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    max-height: 96px;
+    overflow: auto;
+    padding-right: 2px;
+  }
+
+  .route-sub-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    min-height: 28px;
+    padding: 0 4px 0 9px;
+    border-radius: 999px;
+    background: rgba(140, 199, 239, 0.1);
+    border: 1px solid rgba(140, 199, 239, 0.14);
+    color: rgba(158, 216, 250, 0.94);
+    font-size: 0.74rem;
+  }
+
+  .route-sub-pill > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .route-sub-pill--static {
+    padding-right: 9px;
+  }
+
+  .route-add-form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 32px;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .route-add-form input,
+  .route-editor-setting select {
+    width: 100%;
+    min-width: 0;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(6, 9, 13, 0.72);
+    color: #edf6ff;
+    padding: 6px 7px;
+    font-size: 0.74rem;
+  }
+
+  .route-editor-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .route-editor-setting {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+    color: rgba(204, 216, 226, 0.88);
+    font-size: 0.72rem;
+  }
+
+  .route-editor-setting > span {
+    color: rgba(166, 178, 190, 0.86);
+    font-size: 0.66rem;
+    text-transform: uppercase;
+  }
+
+  .route-editor-setting select:disabled {
+    opacity: 0.5;
+  }
+
+  .route-editor-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: wrap;
   }
 
   .roulette-chip {
@@ -3159,6 +3535,9 @@
   }
 
   .path-form button,
+  .route-add-form button,
+  .route-editor-actions button,
+  .route-remove-button,
   .display-chip,
   .ui-chip,
   .roulette-actions button,
@@ -3183,7 +3562,50 @@
     font-size: 0.76rem;
   }
 
+  .route-add-form button,
+  .route-remove-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .route-add-form button {
+    min-height: 31px;
+    border-radius: 9px;
+  }
+
+  .route-add-form button:disabled,
+  .route-editor-actions button:disabled {
+    opacity: 0.46;
+    cursor: not-allowed;
+  }
+
+  .route-remove-button {
+    width: 20px;
+    height: 20px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    color: rgba(229, 241, 250, 0.74);
+  }
+
+  .route-editor-actions button {
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 10px;
+    font-size: 0.74rem;
+  }
+
+  .route-editor-actions button.primary {
+    background: rgba(112, 207, 150, 0.16);
+    border-color: rgba(117, 217, 156, 0.28);
+    color: #eefcf2;
+  }
+
   .path-form button:hover,
+  .route-add-form button:hover,
+  .route-editor-actions button:hover,
+  .route-remove-button:hover,
   .display-chip:hover,
   .ui-chip:hover,
   .roulette-actions button:hover,
@@ -4963,6 +5385,14 @@
 
     .route-chip {
       max-width: 128px;
+    }
+
+    .route-editor-panel {
+      position: fixed;
+      top: 38px;
+      left: 4px;
+      right: 4px;
+      width: auto;
     }
 
     .status-subreddit,
