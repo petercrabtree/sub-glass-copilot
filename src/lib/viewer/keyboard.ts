@@ -74,7 +74,7 @@ const VIEWER_SHORTCUTS: readonly ViewerShortcut[] = [
   {
     action: 'rate_up_next',
     group: 'Actions',
-    description: 'Rate up and next',
+    description: 'Rate up',
     displayKeys: ['W'],
     matchKeys: ['w'],
     preventDefault: true,
@@ -82,7 +82,7 @@ const VIEWER_SHORTCUTS: readonly ViewerShortcut[] = [
   {
     action: 'rate_down_next',
     group: 'Actions',
-    description: 'Rate down and next',
+    description: 'Rate down',
     displayKeys: ['S'],
     matchKeys: ['s'],
     preventDefault: true,

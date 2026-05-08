@@ -127,6 +127,7 @@
   const FEED_SNAPSHOT_SAVE_DELAY_MS = 160;
   const ROULETTE_QUERY_PARAM = 'roulette';
   const MIN_VIDEO_ADVANCE_MS = 5000;
+  const VOTE_DELAY_MS = 3000;
   const VIEWER_UI_DISENGAGE_DELAY_MS = 900;
   const VIDEO_PRELOAD_AHEAD_POSTS = 8;
   const VIDEO_PRELOAD_BEHIND_POSTS = 1;
@@ -184,8 +185,11 @@
   let autoAdvancePaused = $state(false);
   let imageAdvanceSeconds = $state(5);
   let videoAdvancePlays = $state(1);
+  let delayForVote = $state(false);
   let autoAdvanceAnchorMs = $state(Date.now());
   let autoAdvanceVideoAnchorPlayedMs = $state(0);
+  let autoAdvanceVoteDelayPostId = $state('');
+  let autoAdvanceVoteDelayUntilMs = $state(0);
   let countdownNowMs = $state(Date.now());
   let autoAdvanceInFlight = $state(false);
   let scrollSyncFrame = 0;
@@ -714,6 +718,7 @@
       currentMedia?.kind === 'video' &&
       !autoAdvanceSuspended &&
       !autoAdvanceInFlight &&
+      (!autoAdvanceVoteDelayPending || isAutoAdvanceVoteDelayComplete()) &&
       hasForwardTarget() &&
       hasReachedVideoAdvanceBoundary(snapshot)
     );
@@ -791,12 +796,14 @@
         imageSeconds?: number;
         videoPlays?: number;
         paused?: boolean;
+        delayForVote?: boolean;
       };
 
       return {
         imageSeconds: clampImageAdvanceSeconds(parsed.imageSeconds ?? 5),
         videoPlays: clampVideoAdvancePlays(parsed.videoPlays ?? 1),
         paused: Boolean(parsed.paused),
+        delayForVote: Boolean(parsed.delayForVote),
       };
     } catch {
       return null;
@@ -813,6 +820,7 @@
           imageSeconds: imageAdvanceSeconds,
           videoPlays: videoAdvancePlays,
           paused: autoAdvancePaused,
+          delayForVote,
         })
       );
     } catch {
@@ -891,6 +899,11 @@
     countdownNowMs = now;
   }
 
+  function clearAutoAdvanceVoteDelay() {
+    autoAdvanceVoteDelayPostId = '';
+    autoAdvanceVoteDelayUntilMs = 0;
+  }
+
   function engageViewerUi() {
     clearTimeout(viewerUiDisengageTimer);
     viewerUiEngaged = true;
@@ -920,6 +933,7 @@
       : null;
     lastVideoLoopBoundaryAt = 0;
     resetAutoAdvanceClock(0);
+    clearAutoAdvanceVoteDelay();
     autoAdvanceInFlight = false;
 
     if (!media) {
@@ -1592,7 +1606,7 @@
         )
       : null
   );
-  const autoAdvanceRemainingMs = $derived(
+  const autoAdvanceMediaRemainingMs = $derived(
     !currentMedia || autoAdvanceSuspended
       ? null
       : currentMedia.kind === 'video'
@@ -1601,9 +1615,29 @@
           : null
         : Math.max(0, autoAdvanceBaseMs - autoAdvanceElapsedMs)
   );
+  const autoAdvanceVoteDelayPending = $derived(
+    Boolean(currentPost && autoAdvanceVoteDelayPostId === currentPost.id && autoAdvanceVoteDelayUntilMs > 0)
+  );
+  const autoAdvanceVoteDelayRemainingMs = $derived(
+    autoAdvanceVoteDelayPending ? Math.max(0, autoAdvanceVoteDelayUntilMs - countdownNowMs) : null
+  );
+  const autoAdvanceVoteDelayActive = $derived(
+    autoAdvanceVoteDelayRemainingMs !== null && autoAdvanceVoteDelayRemainingMs > 0
+  );
+  const autoAdvanceVotePromptActive = $derived(
+    autoAdvanceVoteDelayActive && currentPost?.localRating === undefined
+  );
+  const autoAdvanceRemainingMs = $derived(
+    !currentMedia || autoAdvanceSuspended
+      ? null
+      : autoAdvanceVoteDelayActive
+        ? autoAdvanceVoteDelayRemainingMs
+        : autoAdvanceMediaRemainingMs
+  );
+  const autoAdvanceProgressBaseMs = $derived(autoAdvanceVoteDelayActive ? VOTE_DELAY_MS : autoAdvanceBaseMs);
   const autoAdvanceProgress = $derived(
-    autoAdvanceBaseMs > 0 && autoAdvanceRemainingMs !== null
-      ? Math.min(1, Math.max(0, 1 - autoAdvanceRemainingMs / autoAdvanceBaseMs))
+    autoAdvanceProgressBaseMs > 0 && autoAdvanceRemainingMs !== null
+      ? Math.min(1, Math.max(0, 1 - autoAdvanceRemainingMs / autoAdvanceProgressBaseMs))
       : 0
   );
   const currentVideoEndsInMs = $derived(
@@ -1618,6 +1652,10 @@
         : currentMedia?.kind === 'video' && currentVideoTiming?.paused
           ? 'video paused'
           : 'autonext paused'
+      : autoAdvanceVoteDelayActive
+        ? currentPost?.localRating === undefined
+          ? `vote window · next ${formatCountdown(autoAdvanceVoteDelayRemainingMs)}`
+          : `vote saved · next ${formatCountdown(autoAdvanceVoteDelayRemainingMs)}`
       : currentMedia?.kind === 'video'
         ? currentVideoTiming?.duration
           ? `end ${formatCountdown(currentVideoEndsInMs)} · next ${formatCountdown(autoAdvanceRemainingMs)}`
@@ -1708,6 +1746,7 @@
     void imageAdvanceSeconds;
     void videoAdvancePlays;
     void autoAdvancePaused;
+    void delayForVote;
     persistAutoAdvanceSettings();
   });
 
@@ -2267,16 +2306,6 @@
     }
   }
 
-  async function rateUpAndAdvance() {
-    await rateUp();
-    await advance();
-  }
-
-  async function rateDownAndAdvance() {
-    await rateDown();
-    await advance();
-  }
-
   async function openReddit() {
     if (!currentPost) return;
     window.open(`https://reddit.com${currentPost.permalink}`, '_blank');
@@ -2340,13 +2369,47 @@
     return Boolean(afterCursor);
   }
 
+  function autoAdvanceWouldLeavePost() {
+    return !currentMedia || !canUseGalleryNavigation() || galleryIndex >= currentMedia.items.length - 1;
+  }
+
+  function canStartAutoAdvanceVoteDelay() {
+    return Boolean(
+      delayForVote &&
+      currentPost &&
+      currentPost.localRating === undefined &&
+      autoAdvanceVoteDelayPostId !== currentPost.id &&
+      autoAdvanceWouldLeavePost()
+    );
+  }
+
+  function maybeStartAutoAdvanceVoteDelay() {
+    if (!canStartAutoAdvanceVoteDelay() || !currentPost) return false;
+
+    autoAdvanceVoteDelayPostId = currentPost.id;
+    autoAdvanceVoteDelayUntilMs = Date.now() + VOTE_DELAY_MS;
+    countdownNowMs = Date.now();
+    return true;
+  }
+
+  function isAutoAdvanceVoteDelayComplete() {
+    return Boolean(
+      currentPost &&
+      autoAdvanceVoteDelayPostId === currentPost.id &&
+      autoAdvanceVoteDelayUntilMs > 0 &&
+      countdownNowMs >= autoAdvanceVoteDelayUntilMs
+    );
+  }
+
   function canAutoAdvanceNow() {
-    if (!currentMedia || currentMedia.kind === 'video') return false;
+    if (!currentMedia) return false;
+    if (currentMedia.kind === 'video' && !isAutoAdvanceVoteDelayComplete()) return false;
 
     return (
       !autoAdvanceSuspended &&
-      autoAdvanceRemainingMs !== null &&
-      autoAdvanceRemainingMs <= 0 &&
+      autoAdvanceMediaRemainingMs !== null &&
+      autoAdvanceMediaRemainingMs <= 0 &&
+      (!autoAdvanceVoteDelayPending || isAutoAdvanceVoteDelayComplete()) &&
       !autoAdvanceInFlight &&
       hasForwardTarget()
     );
@@ -2360,6 +2423,8 @@
       : canAutoAdvanceNow();
 
     if (!canRun) return;
+
+    if (maybeStartAutoAdvanceVoteDelay()) return;
 
     autoAdvanceInFlight = true;
 
@@ -2408,6 +2473,12 @@
     resetAutoAdvanceClock();
   }
 
+  function handleDelayForVoteInput(event: Event) {
+    delayForVote = (event.currentTarget as HTMLInputElement).checked;
+    clearAutoAdvanceVoteDelay();
+    resetAutoAdvanceClock();
+  }
+
   function handleKeydown(event: KeyboardEvent) {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
 
@@ -2441,10 +2512,10 @@
         void openMedia();
         break;
       case 'rate_up_next':
-        void rateUpAndAdvance();
+        void rateUp();
         break;
       case 'rate_down_next':
-        void rateDownAndAdvance();
+        void rateDown();
         break;
       case 'toggle_auto_forward':
         toggleAutoAdvance();
@@ -2485,6 +2556,7 @@
       imageAdvanceSeconds = storedAutoAdvance.imageSeconds;
       videoAdvancePlays = storedAutoAdvance.videoPlays;
       autoAdvancePaused = storedAutoAdvance.paused;
+      delayForVote = storedAutoAdvance.delayForVote;
     }
     rouletteSettings = readStoredRouletteSettings();
 
@@ -2635,6 +2707,7 @@
               loadedMedia={loadedMediaStates}
               imageCacheMode={mediaCacheRuntime}
               whyPost={currentWhyPost}
+              votePromptActive={autoAdvanceVotePromptActive}
               onadvance={advance}
               onretreat={retreat}
               onadvanceGallery={advanceGallery}
@@ -2711,6 +2784,7 @@
             </div>
             <div
               class="selection-actions"
+              class:vote-prompt={autoAdvanceVotePromptActive}
               role="group"
               aria-label="Current post actions"
               onpointerenter={engageViewerUi}
@@ -2722,7 +2796,7 @@
                 type="button"
                 class="selection-action"
                 class:active={currentPost.localRating === 1}
-                title={`Thumbs up (${getViewerShortcut('rate_up_next').displayKeys.join(' / ')} rates and advances)`}
+                title={`Thumbs up (${getViewerShortcut('rate_up_next').displayKeys.join(' / ')})`}
                 aria-label="Rate up"
                 onclick={() => rateUp()}
               ><ThumbsUp size={16} strokeWidth={1.9} aria-hidden="true" /></button>
@@ -2730,7 +2804,7 @@
                 type="button"
                 class="selection-action"
                 class:active={currentPost.localRating === -1}
-                title={`Thumbs down (${getViewerShortcut('rate_down_next').displayKeys.join(' / ')} rates and advances)`}
+                title={`Thumbs down (${getViewerShortcut('rate_down_next').displayKeys.join(' / ')})`}
                 aria-label="Rate down"
                 onclick={() => rateDown()}
               ><ThumbsDown size={16} strokeWidth={1.9} aria-hidden="true" /></button>
@@ -2833,6 +2907,7 @@
             </div>
             <div
               class="selection-actions"
+              class:vote-prompt={autoAdvanceVotePromptActive}
               role="group"
               aria-label="Current masonry selection actions"
               onpointerenter={engageViewerUi}
@@ -2844,7 +2919,7 @@
                 type="button"
                 class="selection-action"
                 class:active={currentPost.localRating === 1}
-                title={`Thumbs up (${getViewerShortcut('rate_up_next').displayKeys.join(' / ')} rates and advances)`}
+                title={`Thumbs up (${getViewerShortcut('rate_up_next').displayKeys.join(' / ')})`}
                 aria-label="Rate up"
                 onclick={() => rateUp()}
               ><ThumbsUp size={16} strokeWidth={1.9} aria-hidden="true" /></button>
@@ -2852,7 +2927,7 @@
                 type="button"
                 class="selection-action"
                 class:active={currentPost.localRating === -1}
-                title={`Thumbs down (${getViewerShortcut('rate_down_next').displayKeys.join(' / ')} rates and advances)`}
+                title={`Thumbs down (${getViewerShortcut('rate_down_next').displayKeys.join(' / ')})`}
                 aria-label="Rate down"
                 onclick={() => rateDown()}
               ><ThumbsDown size={16} strokeWidth={1.9} aria-hidden="true" /></button>
@@ -2944,6 +3019,7 @@
                 loadedMedia={loadedMediaStates}
                 imageCacheMode={mediaCacheRuntime}
                 whyPost={currentWhyPost}
+                votePromptActive={autoAdvanceVotePromptActive}
                 onadvance={advance}
                 onretreat={retreat}
                 onadvanceGallery={advanceGallery}
@@ -3257,6 +3333,7 @@
 	        role="group"
 	        aria-label="Viewer queue and auto-next"
 	        data-paused={autoAdvanceSuspended}
+	        data-vote-delay={autoAdvanceVotePromptActive}
 	        style={`--auto-advance-progress:${autoAdvanceProgress};`}
 	      >
 	        <span class="status-progress" aria-hidden="true"></span>
@@ -3398,6 +3475,15 @@
 	                  />
 	                  <span>x</span>
 	                </label>
+	                <label class="auto-setting-row auto-setting-row--checkbox">
+	                  <span>vote delay</span>
+	                  <input
+	                    type="checkbox"
+	                    checked={delayForVote}
+	                    onchange={handleDelayForVoteInput}
+	                  />
+	                  <span>{formatCountdown(VOTE_DELAY_MS)}</span>
+	                </label>
 	              </div>
 	            </div>
 	          </div>
@@ -3406,6 +3492,7 @@
 	        <button
 	          type="button"
 	          class="auto-dock-toggle auto-countdown-button"
+	          data-vote-delay={autoAdvanceVotePromptActive}
 	          onclick={toggleAutoAdvance}
 	          title={`${autoAdvanceSummary} · Pause or resume auto-next (${getViewerShortcut('toggle_auto_forward').displayKeys.join(' / ')})`}
 	          aria-label={`${autoAdvanceSummary}. Pause or resume auto-next.`}
@@ -4667,6 +4754,19 @@
     box-shadow: none;
   }
 
+  .selection-actions.vote-prompt {
+    border-color: rgba(164, 209, 238, 0.2);
+    box-shadow:
+      0 12px 26px rgba(0, 0, 0, 0.14),
+      0 0 0 1px rgba(164, 209, 238, 0.08);
+  }
+
+  .selection-actions.vote-prompt .selection-action:nth-child(-n + 2):not(.active) {
+    background: rgba(164, 209, 238, 0.095);
+    border-color: rgba(164, 209, 238, 0.18);
+    animation: vote-prompt-pulse 1.6s ease-in-out infinite;
+  }
+
   .selection-action:focus-visible {
     outline: 2px solid rgba(106, 176, 222, 0.75);
     outline-offset: 2px;
@@ -5007,6 +5107,12 @@
     color: #edf6ff;
     padding: 5px 6px;
     font-size: 0.74rem;
+  }
+
+  .auto-setting-row--checkbox input {
+    width: 16px;
+    height: 16px;
+    accent-color: #8cc7ef;
   }
 
   .auto-dock-toggle {
@@ -5363,6 +5469,15 @@
         90deg,
         rgba(164, 209, 238, 0.76) 0% calc(var(--auto-advance-progress) * 100%),
         rgba(255, 255, 255, 0.1) calc(var(--auto-advance-progress) * 100%) 100%
+      );
+  }
+
+  .viewer-status[data-vote-delay='true'] .status-progress {
+    background:
+      linear-gradient(
+        90deg,
+        rgba(164, 209, 238, 0.82) 0% calc(var(--auto-advance-progress) * 100%),
+        rgba(255, 255, 255, 0.12) calc(var(--auto-advance-progress) * 100%) 100%
       );
   }
 
@@ -5769,9 +5884,25 @@
     color: #edf6ff;
   }
 
+  .auto-countdown-button[data-vote-delay='true'] {
+    background: rgba(164, 209, 238, 0.12);
+    border-color: rgba(164, 209, 238, 0.22);
+  }
+
   .auto-countdown-button:hover .auto-advance-title,
   .auto-countdown-button:focus-visible .auto-advance-title {
     color: #edf6ff;
+  }
+
+  @keyframes vote-prompt-pulse {
+    0%, 100% {
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+    50% {
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.05),
+        0 0 0 1px rgba(164, 209, 238, 0.18);
+    }
   }
 
   .ui-reveal-button {

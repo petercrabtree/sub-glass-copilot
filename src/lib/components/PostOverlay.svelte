@@ -62,6 +62,7 @@
     imageCacheMode = 'inactive',
     loadedMedia = [],
     whyPost,
+    votePromptActive = false,
     onadvance,
     onretreat,
     onadvanceGallery,
@@ -86,6 +87,7 @@
     imageCacheMode?: MediaCacheRuntimeState;
     loadedMedia?: LoadedMediaItem[];
     whyPost?: WhyPostInfo;
+    votePromptActive?: boolean;
     onadvance?: () => void;
     onretreat?: () => void;
     onadvanceGallery?: () => void;
@@ -555,19 +557,23 @@
     </p>
   </div>
 
-  <div class="action-dock" class:visible={chromeVisible && uiMode !== 'hidden'}>
+  <div
+    class="action-dock"
+    class:visible={chromeVisible && uiMode !== 'hidden'}
+    class:vote-prompt={votePromptActive}
+  >
     <button
       class="btn-icon"
       class:active={rating === 1}
       onclick={() => onrateUp?.()}
-      title={`Thumbs up (${rateUpShortcut} rates and advances)`}
+      title={`Thumbs up (${rateUpShortcut})`}
       aria-label="Rate up"
     ><ThumbsUp size={16} strokeWidth={1.9} aria-hidden="true" /></button>
     <button
       class="btn-icon"
       class:active={rating === -1}
       onclick={() => onrateDown?.()}
-      title={`Thumbs down (${rateDownShortcut} rates and advances)`}
+      title={`Thumbs down (${rateDownShortcut})`}
       aria-label="Rate down"
     ><ThumbsDown size={16} strokeWidth={1.9} aria-hidden="true" /></button>
     <button
@@ -1247,6 +1253,19 @@
     color: rgba(182, 224, 252, 0.98);
   }
 
+  .action-dock.vote-prompt {
+    border-color: rgba(164, 209, 238, 0.2);
+    box-shadow:
+      0 12px 26px rgba(0, 0, 0, 0.14),
+      0 0 0 1px rgba(164, 209, 238, 0.08);
+  }
+
+  .action-dock.vote-prompt .btn-icon:nth-child(-n + 2):not(.active) {
+    background: rgba(164, 209, 238, 0.095);
+    border-color: rgba(164, 209, 238, 0.18);
+    animation: vote-prompt-pulse 1.6s ease-in-out infinite;
+  }
+
   .btn-icon :global(svg) {
     display: block;
   }
@@ -1410,6 +1429,15 @@
     }
     50% {
       opacity: 1;
+    }
+  }
+
+  @keyframes vote-prompt-pulse {
+    0%, 100% {
+      box-shadow: none;
+    }
+    50% {
+      box-shadow: 0 0 0 1px rgba(164, 209, 238, 0.18);
     }
   }
 
