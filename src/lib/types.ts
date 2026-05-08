@@ -110,6 +110,8 @@ export type SignalEventType =
   | 'impression'
   | 'view_start'
   | 'view_end'
+  | 'dwell'
+  | 'dwell_score'
   | 'advance_next'
   | 'advance_gallery'
   | 'open_reddit'
@@ -152,6 +154,119 @@ export interface FeedSnapshot {
 
 export type RedditListingSort = 'hot' | 'new' | 'top' | 'rising' | 'controversial';
 export type RedditListingTime = 'hour' | 'day' | 'week' | 'month' | 'year' | 'all';
+
+export type FeedRecipeSourceMode = 'random' | 'liked' | 'fresh' | 'comfort' | 'explore';
+export type FeedRunStatus = 'active' | 'archived';
+export type FeedRunItemSlot = 'preferred' | 'fresh' | 'random' | 'niche' | 'fallback';
+export type QueueEventType =
+  | 'build'
+  | 'refresh_tail'
+  | 'lock'
+  | 'unlock'
+  | 'remove_post'
+  | 'suppress_source'
+  | 'refill';
+
+export interface FeedScoreDetail {
+  key: string;
+  label: string;
+  value: string;
+  contribution: number;
+  tone?: 'positive' | 'negative' | 'warning' | 'muted';
+}
+
+export interface FeedRecipe {
+  id: string;
+  name: string;
+  description?: string;
+  sourceMode: FeedRecipeSourceMode;
+  nsfwMode: 'yes' | 'no' | 'only';
+  listingSort: RedditListingSort;
+  listingTime: RedditListingTime;
+  sourceCount: number;
+  targetQueueSize: number;
+  committedAheadCount: number;
+  maxPerSubredditWindow: number;
+  qualityWeight: number;
+  diversityWeight: number;
+  noveltyWeight: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface FeedRun {
+  id: string;
+  recipeId: string;
+  feedName: string;
+  status: FeedRunStatus;
+  currentIndex: number;
+  locked: boolean;
+  committedUntil: number;
+  seed: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface FeedRunItem {
+  id: string;
+  runId: string;
+  position: number;
+  postId: string;
+  subreddit: string;
+  slot: FeedRunItemSlot;
+  score: number;
+  scoreDetails: FeedScoreDetail[];
+  sourceKey?: string;
+  sourceLabel?: string;
+  committed: boolean;
+  addedAt: number;
+  dismissedAt?: number;
+}
+
+export interface PostSource {
+  id: string;
+  postId: string;
+  sourceKey: string;
+  sourceLabel: string;
+  subreddit: string;
+  routePath: string;
+  listingSort?: RedditListingSort;
+  listingTime?: RedditListingTime;
+  listingPosition?: number;
+  fetchedAt: number;
+  isMultireddit: boolean;
+  recipeId?: string;
+  runId?: string;
+  batchId?: string;
+}
+
+export interface SourceStats {
+  sourceKey: string;
+  sourceLabel: string;
+  subreddit: string;
+  listingSort?: RedditListingSort;
+  listingTime?: RedditListingTime;
+  afterCursor?: string | null;
+  lastFetchedAt?: number;
+  lastError?: string;
+  cooldownUntil?: number;
+  fetchCount: number;
+  postsReturned: number;
+  mediaPostsReturned: number;
+  newPostsReturned: number;
+  duplicatePostsReturned: number;
+  updatedAt: number;
+}
+
+export interface QueueEvent {
+  id: string;
+  runId: string;
+  type: QueueEventType;
+  postId?: string;
+  sourceKey?: string;
+  value?: number | string;
+  ts: number;
+}
 
 export interface SubredditRouletteSettings {
   subredditCount: number;

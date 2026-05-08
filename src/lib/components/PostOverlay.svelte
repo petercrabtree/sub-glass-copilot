@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ExternalLink, Image as ImageIcon, ThumbsDown, ThumbsUp } from 'lucide-svelte';
+  import { CircleHelp, ExternalLink, Image as ImageIcon, ThumbsDown, ThumbsUp } from 'lucide-svelte';
   import type { MediaKind, PostRecord } from '$lib/types';
   import type { MediaCacheRuntimeState, MediaCacheState } from '$lib/service-worker/media-cache';
   import type { VideoPreloadState } from '$lib/media/video-preload';
@@ -34,6 +34,19 @@
     videoPreloadBufferedSeconds?: number;
     videoPreloadDurationSeconds?: number;
     videoPreloadError?: string;
+    sourceLabel?: string;
+    slot?: string;
+    score?: number;
+    reason?: string;
+  };
+  type WhyPostDetail = {
+    label: string;
+    value: string;
+    tone?: 'positive' | 'negative' | 'warning' | 'muted';
+  };
+  type WhyPostInfo = {
+    summary: string;
+    details: WhyPostDetail[];
   };
 
   let {
@@ -48,6 +61,7 @@
     isSeen = false,
     imageCacheMode = 'inactive',
     loadedMedia = [],
+    whyPost,
     onadvance,
     onretreat,
     onadvanceGallery,
@@ -71,6 +85,7 @@
     isSeen?: boolean;
     imageCacheMode?: MediaCacheRuntimeState;
     loadedMedia?: LoadedMediaItem[];
+    whyPost?: WhyPostInfo;
     onadvance?: () => void;
     onretreat?: () => void;
     onadvanceGallery?: () => void;
@@ -220,6 +235,22 @@
 
     if (item.itemCount > 1) {
       parts.push(`${item.itemCount} items`);
+    }
+
+    if (item.slot) {
+      parts.push(item.slot);
+    }
+
+    if (item.score !== undefined) {
+      parts.push(`score ${item.score.toFixed(1)}`);
+    }
+
+    if (item.sourceLabel) {
+      parts.push(item.sourceLabel);
+    }
+
+    if (item.reason) {
+      parts.push(item.reason);
     }
 
     if (item.rating === 1) {
@@ -407,6 +438,18 @@
                           {#if item.itemCount > 1}
                             · {item.itemCount} items
                           {/if}
+                          {#if item.slot}
+                            · {item.slot}
+                          {/if}
+                          {#if item.score !== undefined}
+                            · score {item.score.toFixed(1)}
+                          {/if}
+                          {#if item.sourceLabel}
+                            · {item.sourceLabel}
+                          {/if}
+                          {#if item.reason}
+                            · {item.reason}
+                          {/if}
                           {#if item.rating === 1}
                             · rated up
                           {:else if item.rating === -1}
@@ -426,6 +469,12 @@
                             {formatLoadedMediaVideoPreloadState(item)}
                           </span>
                         {/if}
+                        {#if item.slot}
+                          <span class="queue-badge slot">{item.slot}</span>
+                        {/if}
+                        {#if item.score !== undefined}
+                          <span class="queue-badge score">{item.score.toFixed(1)}</span>
+                        {/if}
                       </span>
                       {#if previewedLoadItemId === item.id && item.previewUrl}
                         <span class="queue-preview-popover">
@@ -438,6 +487,31 @@
                         </span>
                       {/if}
                     </button>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          </div>
+        {/if}
+        {#if whyPost}
+          <div class="hover-card-anchor">
+            <button
+              type="button"
+              class="help-chip why-chip"
+              aria-label={`Why this post: ${whyPost.summary}`}
+              title="Why this post?"
+            >
+              <CircleHelp size={14} strokeWidth={1.9} aria-hidden="true" />
+              <span class="utility-label">why</span>
+            </button>
+            <div class="hover-panel why-panel">
+              <p class="panel-title">Why This Post</p>
+              <p class="panel-copy">{whyPost.summary}</p>
+              <div class="why-list" role="list">
+                {#each whyPost.details as detail}
+                  <div class="why-row" data-tone={detail.tone ?? 'neutral'} role="listitem">
+                    <span>{detail.label}</span>
+                    <strong>{detail.value}</strong>
                   </div>
                 {/each}
               </div>
@@ -996,6 +1070,10 @@
   .queue-badge.video[data-video-preload='error'] {
     color: #de7e7e;
   }
+  .queue-badge.slot,
+  .queue-badge.score {
+    color: #c5d4e0;
+  }
   .queue-preview-popover {
     position: absolute;
     top: 50%;
@@ -1021,6 +1099,57 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+  .why-chip {
+    min-width: 28px;
+  }
+  .why-chip :global(svg) {
+    display: block;
+    color: rgba(160, 205, 236, 0.9);
+  }
+  .why-panel {
+    width: min(92vw, 380px);
+  }
+  .why-list {
+    display: grid;
+    gap: 7px;
+    margin-top: 12px;
+  }
+  .why-row {
+    display: grid;
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+    padding: 7px 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.055);
+  }
+  .why-row span {
+    color: #9fb0be;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+  }
+  .why-row strong {
+    min-width: 0;
+    color: #e4eef7;
+    font-size: 0.74rem;
+    font-weight: 500;
+    line-height: 1.3;
+    word-break: break-word;
+  }
+  .why-row[data-tone='positive'] strong {
+    color: #8ce0a0;
+  }
+  .why-row[data-tone='negative'] strong {
+    color: #de7e7e;
+  }
+  .why-row[data-tone='warning'] strong {
+    color: #e0c489;
+  }
+  .why-row[data-tone='muted'] strong {
+    color: #aab4bd;
   }
   .shortcut-group {
     display: flex;

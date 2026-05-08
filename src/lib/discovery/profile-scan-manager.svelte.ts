@@ -1,12 +1,19 @@
 import {
+  getAllAdjacency,
+  getAllEvents,
   getAllSubreddits,
   getSubreddit,
-  getSubredditsDueForProfileScan,
   getUnavailableSubreddits,
   isSubredditUnavailable,
   isSubredditUnavailableStatus,
 } from '$lib/db/store';
 import { scanSubredditProfile, type SubredditProfileScanResult } from '$lib/discovery/subreddits';
+import {
+  DEFAULT_PROFILE_SCAN_STALE_AFTER_MS,
+  prioritizeProfileScanCandidates,
+  type ScanPriorityCandidate,
+  type SubredditHealthStatus,
+} from '$lib/discovery/scan-priority';
 import { readRedditRateLimitState } from '$lib/transport/reddit';
 import type { SubredditRecord } from '$lib/types';
 
@@ -26,6 +33,35 @@ type EnqueueOptions = {
   replaceQueue?: boolean;
   total?: number;
 };
+
+export interface ProfileScanQueuePreviewItem {
+  name: string;
+  score: number;
+  status: SubredditHealthStatus;
+  reasons: string[];
+  queued: boolean;
+  current: boolean;
+}
+
+export interface ProfileScanBudgetSnapshot {
+  mode: ProfileScanMode;
+  autoEnabled: boolean;
+  active: boolean;
+  paused: boolean;
+  queued: number;
+  currentName: string;
+  backgroundTarget: number;
+  backgroundOpenSlots: number;
+  rateLimitRemainingMs: number;
+  lockedElsewhere: boolean;
+  scannedCount: number;
+  totalCount: number;
+  okCount: number;
+  failedCount: number;
+  unavailableCount: number;
+  linksDiscovered: number;
+  lastActivityAt: number;
+}
 
 type NavigatorWithLocks = Navigator & {
   locks?: {
@@ -115,6 +151,9 @@ class ProfileScanManager {
   lastResult = $state<SubredditProfileScanResult | null>(null);
   lastMessage = $state('');
   lastActivityAt = $state(0);
+  priorityPreview = $state<Omit<ProfileScanQueuePreviewItem, 'queued' | 'current'>[]>([]);
+  priorityPreviewUpdatedAt = $state(0);
+  priorityPreviewTotal = $state(0);
   now = $state(Date.now());
 
   private initialized = false;
@@ -146,6 +185,41 @@ class ProfileScanManager {
 
   get queuedCount(): number {
     return this.queue.length;
+  }
+
+  get backgroundOpenSlots(): number {
+    return Math.max(0, BACKGROUND_QUEUE_TARGET - this.queue.length - (this.currentName ? 1 : 0));
+  }
+
+  get budgetSnapshot(): ProfileScanBudgetSnapshot {
+    return {
+      mode: this.mode,
+      autoEnabled: this.autoEnabled,
+      active: this.active,
+      paused: this.paused,
+      queued: this.queue.length,
+      currentName: this.currentName,
+      backgroundTarget: BACKGROUND_QUEUE_TARGET,
+      backgroundOpenSlots: this.backgroundOpenSlots,
+      rateLimitRemainingMs: this.rateLimitRemainingMs,
+      lockedElsewhere: this.lockedElsewhere,
+      scannedCount: this.scannedCount,
+      totalCount: this.totalCount,
+      okCount: this.okCount,
+      failedCount: this.failedCount,
+      unavailableCount: this.unavailableCount,
+      linksDiscovered: this.linksDiscovered,
+      lastActivityAt: this.lastActivityAt,
+    };
+  }
+
+  get queuePreview(): ProfileScanQueuePreviewItem[] {
+    const queued = new Set(this.queue);
+    return this.priorityPreview.map((item) => ({
+      ...item,
+      queued: queued.has(item.name),
+      current: this.currentName === item.name,
+    }));
   }
 
   get rateLimitRemainingMs(): number {
@@ -246,21 +320,25 @@ class ProfileScanManager {
   }
 
   async scanNext(limit = 20): Promise<void> {
-    const due = await getSubredditsDueForProfileScan(limit);
-    this.enqueue(due.map((sub) => sub.name), { mode: 'batch', replaceQueue: true, total: due.length });
+    const due = await this.getPrioritizedDueCandidates({ limit });
+    this.setPriorityPreview(due);
+    this.enqueue(due.map((candidate) => candidate.sub.name), { mode: 'batch', replaceQueue: true, total: due.length });
     await this.waitForCurrentRun();
   }
 
   async scanAllDue(): Promise<void> {
-    const due = await getSubredditsDueForProfileScan(Number.MAX_SAFE_INTEGER);
-    this.enqueue(due.map((sub) => sub.name), { mode: 'full', replaceQueue: true, total: due.length });
+    const due = await this.getPrioritizedDueCandidates();
+    this.setPriorityPreview(due);
+    this.enqueue(due.map((candidate) => candidate.sub.name), { mode: 'full', replaceQueue: true, total: due.length });
     await this.waitForCurrentRun();
   }
 
   async rescanAll(): Promise<void> {
-    const subs = (await getAllSubreddits())
-      .filter(shouldShowInDueQueue)
-      .sort((a, b) => (b.localRating || 0) - (a.localRating || 0));
+    const candidates = await this.getPrioritizedDueCandidates({
+      includeFresh: true,
+    });
+    const subs = candidates.map((candidate) => candidate.sub).filter(shouldShowInDueQueue);
+    this.setPriorityPreview(candidates);
 
     this.enqueue(subs.map((sub) => sub.name), { mode: 'rescan', replaceQueue: true, total: subs.length });
     await this.waitForCurrentRun();
@@ -270,8 +348,13 @@ class ProfileScanManager {
     const failed = (await getAllSubreddits())
       .filter((sub) => shouldShowInDueQueue(sub) && (sub.discoveryStatus === 'failed' || Boolean(sub.profileFetchError)))
       .sort((a, b) => (a.profileFetchFailedAt ?? 0) - (b.profileFetchFailedAt ?? 0));
+    const ranked = await this.rankSpecificSubreddits(failed, {
+      includeFresh: true,
+      includeRecentlyFailed: true,
+    });
+    this.setPriorityPreview(ranked);
 
-    this.enqueue(failed.map((sub) => sub.name), { mode: 'failed', replaceQueue: true, total: failed.length });
+    this.enqueue(ranked.map((candidate) => candidate.sub.name), { mode: 'failed', replaceQueue: true, total: ranked.length });
     await this.waitForCurrentRun();
   }
 
@@ -279,11 +362,17 @@ class ProfileScanManager {
     const unavailable = (await getUnavailableSubreddits())
       .filter(shouldShowInRecheckQueue)
       .sort((a, b) => (a.availabilityCheckedAt ?? 0) - (b.availabilityCheckedAt ?? 0));
+    const ranked = await this.rankSpecificSubreddits(unavailable, {
+      includeFresh: true,
+      includeUnavailable: true,
+      includeRecentlyFailed: true,
+    });
+    this.setPriorityPreview(ranked);
 
-    this.enqueue(unavailable.map((sub) => sub.name), {
+    this.enqueue(ranked.map((candidate) => candidate.sub.name), {
       mode: 'unavailable',
       replaceQueue: true,
-      total: unavailable.length,
+      total: ranked.length,
     });
     await this.waitForCurrentRun();
   }
@@ -303,7 +392,7 @@ class ProfileScanManager {
   async enqueueBackgroundTargets(names: string[]): Promise<void> {
     if (!this.autoEnabled || this.paused) return;
 
-    const targets: string[] = [];
+    const targets: SubredditRecord[] = [];
     for (const rawName of names) {
       const name = normalizeSubredditName(rawName);
       if (!isScanTargetName(name)) continue;
@@ -314,24 +403,37 @@ class ProfileScanManager {
       if (isSubredditUnavailable(existing)) continue;
       if (existing.profileFetchedAt || existing.profileFetchError) continue;
 
-      targets.push(name);
+      targets.push(existing);
     }
 
-    this.enqueue(targets, { mode: this.mode === 'idle' ? 'background' : this.mode });
+    if (targets.length === 0) return;
+
+    const ranked = await this.rankSpecificSubreddits(targets, {
+      staleAfterMs: Number.MAX_SAFE_INTEGER,
+    });
+    this.setPriorityPreview(ranked);
+    this.enqueue(ranked.map((candidate) => candidate.sub.name), { mode: this.mode === 'idle' ? 'background' : this.mode });
   }
 
   async refreshBackgroundQueue(): Promise<void> {
     if (!this.autoEnabled || this.paused) return;
 
-    const openSlots = Math.max(0, BACKGROUND_QUEUE_TARGET - this.queue.length - (this.currentName ? 1 : 0));
+    const openSlots = this.backgroundOpenSlots;
     if (openSlots === 0) return;
 
-    const due = await getSubredditsDueForProfileScan(openSlots, Number.MAX_SAFE_INTEGER);
-    const names = due
-      .filter((sub) => !sub.profileFetchedAt)
-      .map((sub) => sub.name);
+    const due = await this.getPrioritizedDueCandidates({
+      limit: openSlots,
+      staleAfterMs: Number.MAX_SAFE_INTEGER,
+    });
+    this.setPriorityPreview(due);
+    const names = due.map((candidate) => candidate.sub.name);
 
     this.enqueue(names, { mode: this.mode === 'idle' ? 'background' : this.mode });
+  }
+
+  async refreshPriorityPreview(limit = 20): Promise<void> {
+    const due = await this.getPrioritizedDueCandidates({ limit });
+    this.setPriorityPreview(due);
   }
 
   private enqueue(names: string[], options: EnqueueOptions): void {
@@ -358,6 +460,7 @@ class ProfileScanManager {
     if (next.length === 0) return;
 
     this.queue = [...this.queue, ...next];
+    this.ensurePriorityPreviewForNames(next);
     if (options.total !== undefined && !options.replaceQueue) {
       this.totalCount = Math.max(this.totalCount, options.total);
     }
@@ -375,6 +478,74 @@ class ProfileScanManager {
     this.unavailableCount = 0;
     this.linksDiscovered = 0;
     this.lastResult = null;
+  }
+
+  private async getPrioritizedDueCandidates(options: {
+    limit?: number;
+    staleAfterMs?: number;
+    includeFresh?: boolean;
+  } = {}): Promise<ScanPriorityCandidate[]> {
+    const [subs, events, adjacency] = await Promise.all([
+      getAllSubreddits(),
+      getAllEvents(),
+      getAllAdjacency(),
+    ]);
+    return prioritizeProfileScanCandidates(subs, events, adjacency, {
+      now: Date.now(),
+      staleAfterMs: options.staleAfterMs ?? DEFAULT_PROFILE_SCAN_STALE_AFTER_MS,
+      limit: options.limit,
+      includeFresh: options.includeFresh,
+    });
+  }
+
+  private async rankSpecificSubreddits(
+    subs: SubredditRecord[],
+    options: {
+      staleAfterMs?: number;
+      includeFresh?: boolean;
+      includeUnavailable?: boolean;
+      includeRecentlyFailed?: boolean;
+    } = {}
+  ): Promise<ScanPriorityCandidate[]> {
+    const [events, adjacency] = await Promise.all([
+      getAllEvents(),
+      getAllAdjacency(),
+    ]);
+    return prioritizeProfileScanCandidates(subs, events, adjacency, {
+      now: Date.now(),
+      staleAfterMs: options.staleAfterMs ?? DEFAULT_PROFILE_SCAN_STALE_AFTER_MS,
+      includeFresh: options.includeFresh,
+      includeUnavailable: options.includeUnavailable,
+      includeRecentlyFailed: options.includeRecentlyFailed,
+    });
+  }
+
+  private setPriorityPreview(candidates: ScanPriorityCandidate[]): void {
+    this.priorityPreview = candidates.slice(0, 24).map((candidate) => ({
+      name: candidate.sub.name,
+      score: candidate.score,
+      status: candidate.status,
+      reasons: candidate.reasons,
+    }));
+    this.priorityPreviewTotal = candidates.length;
+    this.priorityPreviewUpdatedAt = Date.now();
+  }
+
+  private ensurePriorityPreviewForNames(names: string[]): void {
+    const knownNames = new Set(this.priorityPreview.map((item) => item.name));
+    const missing = names
+      .filter((name) => !knownNames.has(name))
+      .map((name) => ({
+        name,
+        score: 0,
+        status: 'unscanned' as SubredditHealthStatus,
+        reasons: ['queued directly'],
+      }));
+
+    if (missing.length === 0) return;
+
+    this.priorityPreview = [...this.priorityPreview, ...missing].slice(0, 24);
+    this.priorityPreviewUpdatedAt = Date.now();
   }
 
   private kick(): void {

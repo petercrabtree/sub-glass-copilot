@@ -8,6 +8,13 @@
   } from '$lib/db/store';
   import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import {
+    DEFAULT_PROFILE_SCAN_STALE_AFTER_MS,
+    getSubredditHealthStatus,
+    prioritizeProfileScanCandidates,
+    type ScanPriorityCandidate,
+    type SubredditHealthStatus,
+  } from '$lib/discovery/scan-priority';
+  import {
     clearMediaCache,
     getMediaCacheDiagnostics,
     subscribeToMediaCacheUpdates,
@@ -22,11 +29,13 @@
   let stats = $state({ subreddits: 0, posts: 0, media: 0, events: 0, adjacency: 0, snapshots: 0 });
   let subreddits = $state<SubredditRecord[]>([]);
   let posts = $state<PostRecord[]>([]);
+  let eventHistory = $state<SignalEvent[]>([]);
   let events = $state<SignalEvent[]>([]);
+  let adjacencyHistory = $state<AdjacencyLink[]>([]);
   let adjacency = $state<AdjacencyLink[]>([]);
   let snapshots = $state<FeedSnapshot[]>([]);
   let mediaCache = $state<MediaCacheDiagnostics | null>(null);
-  let activeTab = $state<'overview' | 'cache' | 'discovery' | 'subreddits' | 'posts' | 'events' | 'adjacency'>('overview');
+  let activeTab = $state<'overview' | 'cache' | 'discovery' | 'health' | 'subreddits' | 'posts' | 'events' | 'adjacency'>('overview');
   let importText = $state('');
   let importError = $state('');
   let importSuccess = $state(false);
@@ -55,6 +64,43 @@
     banned: subreddits.filter((sub) => sub.availabilityStatus === 'banned').length,
     unavailable: subreddits.filter((sub) => isSubredditUnavailable(sub)).length,
     muted: subreddits.filter((sub) => sub.isMuted || sub.discoveryStatus === 'muted').length,
+  });
+  let scanPriorityCandidates = $derived<ScanPriorityCandidate[]>(
+    prioritizeProfileScanCandidates(subreddits, eventHistory, adjacencyHistory, {
+      includeFresh: true,
+      includeUnavailable: true,
+      includeRecentlyFailed: true,
+    })
+  );
+  let scanPriorityByName = $derived(new Map(scanPriorityCandidates.map((candidate) => [candidate.sub.name, candidate])));
+  let subredditHealthRows = $derived(
+    subreddits
+      .map((sub) => ({
+        sub,
+        status: getSubredditHealthStatus(sub, Date.now(), DEFAULT_PROFILE_SCAN_STALE_AFTER_MS),
+        priority: scanPriorityByName.get(sub.name),
+      }))
+      .sort((a, b) => {
+        const severity: Record<SubredditHealthStatus, number> = {
+          failed: 0,
+          unavailable: 1,
+          unscanned: 2,
+          stale: 3,
+          muted: 4,
+          healthy: 5,
+        };
+        return severity[a.status] - severity[b.status] ||
+          (b.priority?.score ?? -1) - (a.priority?.score ?? -1) ||
+          b.sub.localRating - a.sub.localRating;
+      })
+  );
+  let healthStats = $derived({
+    healthy: subredditHealthRows.filter((row) => row.status === 'healthy').length,
+    stale: subredditHealthRows.filter((row) => row.status === 'stale').length,
+    unscanned: subredditHealthRows.filter((row) => row.status === 'unscanned').length,
+    failed: subredditHealthRows.filter((row) => row.status === 'failed').length,
+    unavailable: subredditHealthRows.filter((row) => row.status === 'unavailable').length,
+    muted: subredditHealthRows.filter((row) => row.status === 'muted').length,
   });
 
   onMount(() => {
@@ -93,7 +139,9 @@
     stats = { subreddits: subs.length, posts: ps.length, media: ms.length, events: evs.length, adjacency: adj.length, snapshots: snaps.length };
     subreddits = subs;
     posts = ps;
+    eventHistory = evs;
     events = evs.slice(-100).reverse();
+    adjacencyHistory = adj;
     adjacency = adj.slice(0, 100);
     snapshots = snaps.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20);
   }
@@ -204,6 +252,11 @@
     await runDiscoveryAction(() => profileScanManager.scanUnavailable());
   }
 
+  async function refreshScanPriorityPreview() {
+    await profileScanManager.refreshPriorityPreview(24);
+    await loadData();
+  }
+
   async function rescanAllProfiles() {
     if (!window.confirm('Rescan every unmuted subreddit profile? This can issue many Reddit requests.')) return;
     await runDiscoveryAction(() => profileScanManager.rescanAll());
@@ -251,6 +304,41 @@
       return url;
     }
   }
+
+  function formatAge(ts: number | undefined) {
+    if (!ts) return 'never';
+
+    const ageMs = Math.max(0, Date.now() - ts);
+    const minutes = Math.floor(ageMs / 60000);
+    if (minutes < 60) return `${Math.max(1, minutes)}m ago`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return `${hours}h ago`;
+
+    return `${Math.floor(hours / 24)}d ago`;
+  }
+
+  function formatWait(ms: number) {
+    if (ms <= 0) return 'ready';
+    const seconds = Math.ceil(ms / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    return `${Math.ceil(seconds / 60)}m`;
+  }
+
+  function formatPriorityScore(score: number | undefined) {
+    return score === undefined ? '—' : score.toFixed(1);
+  }
+
+  function formatPriorityReasons(candidate: ScanPriorityCandidate | undefined) {
+    return candidate?.reasons.length ? candidate.reasons.slice(0, 4).join(' · ') : 'no scan signal';
+  }
+
+  function getHealthDetail(sub: SubredditRecord) {
+    if (isSubredditUnavailable(sub)) return sub.availabilityDetail ?? sub.availabilityStatus ?? 'unavailable';
+    if (sub.profileFetchError) return sub.profileFetchError;
+    if (!sub.profileFetchedAt) return 'profile unscanned';
+    return `profile ${formatAge(sub.profileFetchedAt)}`;
+  }
 </script>
 
 <div class="admin-page">
@@ -258,6 +346,7 @@
     <a href="/r/all" class="logo">SubGlass</a>
     <div class="nav-links">
       <a href="/r/all">viewer</a>
+      <a href="/feed/random">feed</a>
       <a href="/roulette">roulette</a>
       <a href="/discover">discover</a>
       <a href="/admin" class="active">admin</a>
@@ -302,7 +391,7 @@
       </div>
 
       <div class="tabs">
-        {#each (['overview', 'cache', 'discovery', 'subreddits', 'posts', 'events', 'adjacency'] as const) as tab}
+        {#each (['overview', 'cache', 'discovery', 'health', 'subreddits', 'posts', 'events', 'adjacency'] as const) as tab}
           <button
             class="tab"
             class:active={activeTab === tab}
@@ -478,6 +567,50 @@
               </div>
             </div>
 
+            <div class="scan-budget-panel">
+              <div class="scan-budget-header">
+                <div>
+                  <h3>Scan Budget</h3>
+                  <p>Live queue pressure, Reddit pacing, and the priority-ranked candidates that will be scanned next.</p>
+                </div>
+                <button class="action-btn" onclick={refreshScanPriorityPreview} disabled={scanBusy}>Refresh priority</button>
+              </div>
+              <div class="scan-budget-grid">
+                <span>mode</span>
+                <strong>{profileScanManager.budgetSnapshot.mode}</strong>
+                <span>current</span>
+                <strong>{profileScanManager.budgetSnapshot.currentName ? `r/${profileScanManager.budgetSnapshot.currentName}` : 'idle'}</strong>
+                <span>queue</span>
+                <strong>{profileScanManager.budgetSnapshot.queued}/{profileScanManager.budgetSnapshot.backgroundTarget}</strong>
+                <span>background slots</span>
+                <strong>{profileScanManager.budgetSnapshot.backgroundOpenSlots}</strong>
+                <span>rate wait</span>
+                <strong>{formatWait(profileScanManager.budgetSnapshot.rateLimitRemainingMs)}</strong>
+                <span>lock</span>
+                <strong>{profileScanManager.budgetSnapshot.lockedElsewhere ? 'another tab' : 'local'}</strong>
+              </div>
+
+              {#if profileScanManager.queuePreview.length > 0}
+                <div class="priority-list" role="list" aria-label="Profile scan priority queue">
+                  {#each profileScanManager.queuePreview as item}
+                    <div class="priority-row" role="listitem" data-current={item.current} data-queued={item.queued}>
+                      <a href="/r/{item.name}" class="sub-link">r/{item.name}</a>
+                      <span class="health-pill" data-health={item.status}>{item.status}</span>
+                      <span class="field">score <strong>{item.score.toFixed(1)}</strong></span>
+                      <span class="field meta priority-reasons">{item.reasons.slice(0, 4).join(' · ')}</span>
+                      {#if item.current}
+                        <span class="field success">scanning</span>
+                      {:else if item.queued}
+                        <span class="field">queued</span>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <p class="scan-detail">No priority preview yet. Refresh priority or queue a scan.</p>
+              {/if}
+            </div>
+
             <div class="discovery-controls">
               <label class="toggle-row" title={profileScanManager.detailText}>
                 <input
@@ -548,6 +681,75 @@
                   </button>
                   {#if sub.profileFetchError}
                     <button class="row-action" onclick={() => clearSubredditFailure(sub)}>clear fail</button>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          </section>
+
+        {:else if activeTab === 'health'}
+          <section class="health-panel">
+            <div class="cache-panel-header">
+              <div>
+                <h2>Subreddit Health</h2>
+                <p>Availability, profile freshness, passive signal strength, and quick remediation actions for the local subreddit catalog.</p>
+              </div>
+              <div class="cache-actions">
+                <button class="action-btn" onclick={refreshScanPriorityPreview} disabled={scanBusy}>Refresh priority</button>
+                <button class="action-btn" onclick={scanNextProfiles} disabled={scanBusy}>{scanBusy ? 'Scanning…' : 'Scan next 20'}</button>
+              </div>
+            </div>
+
+            <div class="stats-grid cache-stats-grid">
+              <div class="stat-card">
+                <div class="stat-value">{healthStats.healthy}</div>
+                <div class="stat-label">Healthy</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{healthStats.stale}</div>
+                <div class="stat-label">Stale</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{healthStats.unscanned}</div>
+                <div class="stat-label">Unscanned</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{healthStats.failed}</div>
+                <div class="stat-label">Failed</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{healthStats.unavailable}</div>
+                <div class="stat-label">Unavailable</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{healthStats.muted}</div>
+                <div class="stat-label">Muted</div>
+              </div>
+            </div>
+
+            <div class="data-table health-table">
+              {#each subredditHealthRows as row}
+                <div class="data-row health-row" class:muted-row={row.status === 'muted'}>
+                  <a href="/r/{row.sub.name}" class="sub-link">r/{row.sub.name}</a>
+                  <span class="health-pill" data-health={row.status}>{row.status}</span>
+                  <span class="field">priority <strong>{formatPriorityScore(row.priority?.score)}</strong></span>
+                  <span class="field">rating <strong>{Number(row.sub.localRating.toFixed(2))}</strong></span>
+                  <span class="field">{row.sub.isNsfw === true ? 'nsfw' : row.sub.isNsfw === false ? 'sfw' : 'nsfw unknown'}</span>
+                  <span class="field meta">{getHealthDetail(row.sub)}</span>
+                  <span class="field meta priority-reasons">{formatPriorityReasons(row.priority)}</span>
+                  <label class="row-toggle">
+                    <input
+                      type="checkbox"
+                      checked={row.sub.isMuted}
+                      onchange={(event) => toggleSubredditMuted(row.sub, event)}
+                    />
+                    <span>muted</span>
+                  </label>
+                  <button class="row-action" onclick={() => scanOneProfile(row.sub.name)} disabled={scanBusy}>
+                    {isSubredditUnavailable(row.sub) ? 'recheck' : 'scan'}
+                  </button>
+                  {#if row.sub.profileFetchError}
+                    <button class="row-action" onclick={() => clearSubredditFailure(row.sub)}>clear fail</button>
                   {/if}
                 </div>
               {/each}
@@ -667,7 +869,8 @@
   .tab-content { min-height: 300px; }
   .export-import { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; }
   .cache-panel { display: flex; flex-direction: column; gap: 20px; }
-  .discovery-panel { display: flex; flex-direction: column; gap: 18px; }
+  .discovery-panel,
+  .health-panel { display: flex; flex-direction: column; gap: 18px; }
   .cache-panel-header {
     display: flex;
     justify-content: space-between;
@@ -722,6 +925,122 @@
     background: #101010;
     border: 1px solid #222;
     border-radius: 8px;
+  }
+  .scan-budget-panel {
+    display: grid;
+    gap: 12px;
+    padding: 14px;
+    background: #101010;
+    border: 1px solid #222;
+    border-radius: 8px;
+  }
+  .scan-budget-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .scan-budget-header h3 {
+    margin: 0 0 6px;
+    font-size: 1rem;
+  }
+  .scan-budget-header p {
+    margin: 0;
+  }
+  .scan-budget-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .scan-budget-grid span,
+  .scan-budget-grid strong {
+    min-width: 0;
+    padding: 7px 8px;
+    background: #151515;
+    border: 1px solid #242424;
+    border-radius: 6px;
+    font-size: 0.76rem;
+  }
+  .scan-budget-grid span {
+    color: #777;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .scan-budget-grid strong {
+    color: #d8e5ef;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .priority-list {
+    display: grid;
+    gap: 6px;
+  }
+  .priority-row {
+    display: grid;
+    grid-template-columns: minmax(110px, 0.9fr) auto auto minmax(0, 2fr) auto;
+    gap: 8px;
+    align-items: center;
+    padding: 7px 8px;
+    background: #121212;
+    border: 1px solid #222;
+    border-radius: 6px;
+  }
+  .priority-row[data-current='true'] {
+    border-color: #3f7551;
+    background: #111a14;
+  }
+  .priority-row[data-queued='true'] {
+    border-color: #2b4054;
+  }
+  .priority-reasons {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .health-table {
+    gap: 6px;
+  }
+  .health-row {
+    align-items: center;
+  }
+  .health-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 78px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px solid #333;
+    background: #181818;
+    color: #aaa;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .health-pill[data-health='healthy'] {
+    color: #8fd59e;
+    border-color: #315c3a;
+    background: #121d15;
+  }
+  .health-pill[data-health='stale'],
+  .health-pill[data-health='unscanned'] {
+    color: #d7bd7b;
+    border-color: #5d4d25;
+    background: #211c10;
+  }
+  .health-pill[data-health='failed'],
+  .health-pill[data-health='unavailable'] {
+    color: #df9090;
+    border-color: #653636;
+    background: #211313;
+  }
+  .health-pill[data-health='muted'] {
+    color: #888;
+    border-color: #303030;
+    background: #151515;
   }
   .toggle-row,
   .row-toggle {
@@ -800,6 +1119,13 @@
     .export-import { grid-template-columns: 1fr; }
     .cache-summary-grid {
       grid-template-columns: 1fr;
+    }
+    .scan-budget-grid,
+    .priority-row {
+      grid-template-columns: 1fr;
+    }
+    .priority-reasons {
+      white-space: normal;
     }
   }
 </style>

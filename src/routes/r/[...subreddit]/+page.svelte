@@ -4,11 +4,20 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import { ExternalLink, Image as ImageIcon, Plus, ThumbsDown, ThumbsUp, X } from 'lucide-svelte';
-  import type { FeedSnapshot, MediaGroup, MediaItem, MediaKind, PostRecord, SubredditRouletteSettings } from '$lib/types';
+  import type {
+    FeedSnapshot,
+    MediaGroup,
+    MediaItem,
+    MediaKind,
+    PostRecord,
+    SignalEvent,
+    SignalEventType,
+    SubredditRecord,
+    SubredditRouletteSettings,
+  } from '$lib/types';
   import { fetchListing, readRedditDebugState } from '$lib/transport/reddit';
   import type { RedditDebugState, RedditRequestError } from '$lib/transport/reddit';
-  import { normalizeListingResponse } from '$lib/normalize/posts';
-  import { enrichRedgifsPosts } from '$lib/media/redgifs';
+  import { normalizeListingMediaPosts, persistFetchedPosts } from '$lib/feed/ingest';
   import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import {
     DEFAULT_ROULETTE_SETTINGS,
@@ -23,12 +32,10 @@
     readStoredRouletteSettings,
   } from '$lib/discovery/roulette';
   import {
-    upsertPost, upsertSubreddit, upsertMedia, upsertAdjacency,
     markPostSeen, setPostRating, getPost, getSeenPostIds, addEvent,
     getSubreddit, updateSubredditRating, getFeedSnapshot, setFeedSnapshot,
-    getPostsByIds, getAllSubreddits, isSubredditUnavailable,
+    getPostsByIds, getAllSubreddits, isSubredditUnavailable, getEventsForPost,
   } from '$lib/db/store';
-  import { extractLinksFromPost } from '$lib/adjacency/extract';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
   import PostOverlay from '$lib/components/PostOverlay.svelte';
   import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
@@ -94,6 +101,21 @@
     videoPreloadDurationSeconds?: number;
     videoPreloadError?: string;
   };
+  type WhyPostDetail = {
+    label: string;
+    value: string;
+    tone?: 'positive' | 'negative' | 'warning' | 'muted';
+  };
+  type WhyPostInfo = {
+    summary: string;
+    details: WhyPostDetail[];
+  };
+  type DwellSample = {
+    post: PostRecord;
+    focusedMs: number;
+    totalMs: number;
+    reason: string;
+  };
 
   type ViewerUiMode = 'full' | 'mini' | 'hidden';
   type RouteListingSort = (typeof ROULETTE_LISTING_SORTS)[number];
@@ -109,6 +131,12 @@
   const VIDEO_PRELOAD_AHEAD_POSTS = 8;
   const VIDEO_PRELOAD_BEHIND_POSTS = 1;
   const VIDEO_PRELOAD_DEFAULT_MAX_ACTIVE = 2;
+  const DWELL_MIN_EVENT_MS = 250;
+  const DWELL_FAST_SKIP_MS = 900;
+  const SMART_REFILL_MIN_AHEAD_POSTS = 8;
+  const SMART_REFILL_MAX_AHEAD_POSTS = 36;
+  const SMART_REFILL_LOOKAHEAD_MS = 90 * 1000;
+  const SMART_REFILL_HISTORY_MS = 3 * 60 * 1000;
   const DISPLAY_MODES: Array<{
     id: DisplayMode;
     label: string;
@@ -179,6 +207,18 @@
   let rouletteSettings = $state<SubredditRouletteSettings>(DEFAULT_ROULETTE_SETTINGS);
   let rouletteTransitioning = $state(false);
   let rouletteMessage = $state('');
+  let currentSubredditRecord = $state<SubredditRecord | null>(null);
+  let currentPostEvents = $state<SignalEvent[]>([]);
+  let currentPostContextKey = '';
+  let dwellPostId = $state('');
+  let dwellStartedAt = $state(0);
+  let dwellFocusedMs = $state(0);
+  let dwellActiveSegmentStartedAt = $state(0);
+  let trackedPost: PostRecord | undefined;
+  let recentAdvanceTimes = $state<number[]>([]);
+  let lastLoadMoreTrigger = $state<'manual' | 'smart-refill' | 'scroll' | 'auto-next'>('manual');
+  const dwellScoredPostIds = new Set<string>();
+  const smartRefillAttemptKeys = new Set<string>();
   let routeEditorOpen = $state(false);
   let routeDraftSubreddits = $state<string[]>(['all']);
   let routeDraftInput = $state('');
@@ -199,6 +239,150 @@
 
   function formatTimestamp(ts: number): string {
     return new Date(ts).toLocaleTimeString();
+  }
+
+  function formatDurationLabel(ms: number): string {
+    const safeMs = Math.max(0, Math.round(ms));
+    if (safeMs < 1000) return `${safeMs}ms`;
+
+    const seconds = safeMs / 1000;
+    if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+
+    const minutes = Math.floor(seconds / 60);
+    const remainder = Math.round(seconds % 60);
+    return `${minutes}m${remainder > 0 ? ` ${remainder}s` : ''}`;
+  }
+
+  function formatSignedNumber(value: number, digits = 2): string {
+    const rounded = Number(value.toFixed(digits));
+    return `${rounded > 0 ? '+' : ''}${rounded}`;
+  }
+
+  function getViewerAttentionActive() {
+    if (typeof document === 'undefined') return true;
+    return document.visibilityState === 'visible' && document.hasFocus();
+  }
+
+  function syncDwellAttentionState(now = Date.now()) {
+    if (!dwellPostId) return;
+
+    const active = getViewerAttentionActive();
+    if (active && !dwellActiveSegmentStartedAt) {
+      dwellActiveSegmentStartedAt = now;
+      return;
+    }
+
+    if (!active && dwellActiveSegmentStartedAt) {
+      dwellFocusedMs += Math.max(0, now - dwellActiveSegmentStartedAt);
+      dwellActiveSegmentStartedAt = 0;
+    }
+  }
+
+  function getCurrentDwellFocusedMs(now = Date.now()) {
+    return dwellFocusedMs + (dwellActiveSegmentStartedAt ? Math.max(0, now - dwellActiveSegmentStartedAt) : 0);
+  }
+
+  function startDwellTracking(post: PostRecord) {
+    const now = Date.now();
+    dwellPostId = post.id;
+    dwellStartedAt = now;
+    dwellFocusedMs = 0;
+    dwellActiveSegmentStartedAt = getViewerAttentionActive() ? now : 0;
+  }
+
+  function closeDwellSample(post: PostRecord, reason: string): DwellSample | null {
+    if (dwellPostId !== post.id) return null;
+
+    const now = Date.now();
+    syncDwellAttentionState(now);
+    const sample: DwellSample = {
+      post,
+      focusedMs: getCurrentDwellFocusedMs(now),
+      totalMs: Math.max(0, now - dwellStartedAt),
+      reason,
+    };
+
+    dwellPostId = '';
+    dwellStartedAt = 0;
+    dwellFocusedMs = 0;
+    dwellActiveSegmentStartedAt = 0;
+    return sample;
+  }
+
+  function getDwellExpectedMs(post: PostRecord) {
+    const kind = post.media?.kind;
+    if (kind === 'video') {
+      const durationSeconds = post.media?.items[0]?.durationSeconds;
+      if (durationSeconds && Number.isFinite(durationSeconds)) {
+        return Math.min(24_000, Math.max(5_000, durationSeconds * 650));
+      }
+      return 8_000;
+    }
+
+    if (kind === 'gallery') return 5_000;
+    if (kind === 'external_video') return 10_000;
+    return 3_000;
+  }
+
+  function getDwellRatingDelta(sample: DwellSample) {
+    if (sample.focusedMs < DWELL_MIN_EVENT_MS) return 0;
+    if (sample.focusedMs < DWELL_FAST_SKIP_MS) return -0.05;
+
+    const expectedMs = getDwellExpectedMs(sample.post);
+    if (sample.focusedMs < expectedMs * 0.85) return 0;
+    if (sample.focusedMs < expectedMs * 2.5) return 0.05;
+    return 0.12;
+  }
+
+  async function refreshCurrentSubredditRecord(name: string) {
+    currentSubredditRecord = await getSubreddit(name) ?? null;
+  }
+
+  async function persistDwellSample(sample: DwellSample | null) {
+    if (!sample || sample.focusedMs < DWELL_MIN_EVENT_MS) return;
+
+    await addEvent({
+      type: 'dwell',
+      postId: sample.post.id,
+      mediaId: sample.post.media?.id,
+      subreddit: sample.post.subreddit,
+      value: Math.round(sample.focusedMs),
+      ts: Date.now(),
+    });
+
+    if (currentPost?.id === sample.post.id) {
+      currentPostEvents = [
+        ...currentPostEvents,
+        {
+          id: `local:dwell:${Date.now()}`,
+          type: 'dwell',
+          postId: sample.post.id,
+          mediaId: sample.post.media?.id,
+          subreddit: sample.post.subreddit,
+          value: Math.round(sample.focusedMs),
+          ts: Date.now(),
+        },
+      ];
+    }
+
+    if (dwellScoredPostIds.has(sample.post.id)) return;
+    const delta = getDwellRatingDelta(sample);
+    if (delta === 0) return;
+
+    dwellScoredPostIds.add(sample.post.id);
+    await updateSubredditRating(sample.post.subreddit, delta);
+    await addEvent({
+      type: 'dwell_score',
+      postId: sample.post.id,
+      mediaId: sample.post.media?.id,
+      subreddit: sample.post.subreddit,
+      value: delta,
+      ts: Date.now(),
+    });
+
+    if (currentPost?.subreddit === sample.post.subreddit) {
+      await refreshCurrentSubredditRecord(sample.post.subreddit);
+    }
   }
 
   function clampAspectRatio(width?: number, height?: number): number {
@@ -795,21 +979,17 @@
       return;
     }
 
-    const previousPost = currentPost;
     setDisplaySelection(index);
     focusCurrentPostInActiveMode('smooth');
-    await recordEvent('view_end', previousPost);
-    await recordEvent('impression', posts[index]);
-    await recordEvent('view_start', posts[index]);
 
-    if (index >= posts.length - (VIDEO_PRELOAD_AHEAD_POSTS + 5)) {
-      void loadMore();
+    if (posts.length - index - 1 <= smartRefillAheadTarget) {
+      void loadMore('manual');
     }
   }
 
   function maybeLoadMoreFromContainer(container: HTMLElement) {
     if (container.scrollTop + container.clientHeight >= container.scrollHeight - container.clientHeight * 0.9) {
-      void loadMore();
+      void loadMore('scroll');
     }
   }
 
@@ -1158,23 +1338,20 @@
     }, FEED_SNAPSHOT_SAVE_DELAY_MS);
   }
 
-  async function persistLoadedPosts(mediaPosts: PostRecord[], routePath: string) {
-    await Promise.all(mediaPosts.map(async (post) => {
-      const routedPost = { ...post, fetchedInRoute: routePath };
-      await upsertPost(routedPost);
-      if (routedPost.media) await upsertMedia(routedPost.media);
-      await ensureSubreddit(routedPost.subreddit, undefined, undefined, routedPost.isNsfw);
-      const links = extractLinksFromPost(
-        routedPost.title,
-        routedPost.selftext ?? '',
-        routedPost.subreddit,
-        routedPost.crosspostParentSubreddit
-      );
-      for (const link of links) {
-        await upsertAdjacency(link);
-        await ensureSubreddit(link.toSubreddit, `${link.source}:r/${routedPost.subreddit}`, link.evidence);
-      }
-    }));
+  async function persistLoadedPosts(
+    mediaPosts: PostRecord[],
+    routePath: string,
+    sub: string,
+    time: string | undefined,
+    roulette: boolean
+  ) {
+    await persistFetchedPosts(mediaPosts, {
+      subreddit: extractSubreddits(sub).join('+') || sub,
+      listingSort: getRouteListingSort(sub),
+      listingTime: getRouteListingTime(time),
+      routePath,
+      isMultireddit: extractSubreddits(sub).length > 1 || roulette,
+    });
   }
 
   function getProfileScanTargets(sub: string, mediaPosts: PostRecord[]) {
@@ -1225,6 +1402,46 @@
     Math.min(currentIndex + 1, rouletteSettings.imagesPerRound)
   );
   const rouletteSortUsesTime = $derived(isTimedRouletteListingSort(rouletteSettings.listingSort));
+  const currentDwellPreviewMs = $derived(
+    currentPost?.id === dwellPostId ? getCurrentDwellFocusedMs(countdownNowMs) : 0
+  );
+  const currentWhyPost = $derived(
+    buildWhyPostInfo(currentPost, currentSubredditRecord, currentPostEvents, currentDwellPreviewMs)
+  );
+  const recentConsumptionIntervals = $derived(
+    recentAdvanceTimes
+      .filter((ts) => countdownNowMs - ts <= SMART_REFILL_HISTORY_MS)
+      .slice(-10)
+      .map((ts, index, recent) => index === 0 ? 0 : ts - recent[index - 1])
+      .filter((interval) => interval > 0)
+  );
+  const estimatedPostConsumptionMs = $derived(
+    recentConsumptionIntervals.length > 0
+      ? Math.max(
+          1_500,
+          Math.min(
+            30_000,
+            recentConsumptionIntervals.reduce((total, interval) => total + interval, 0) /
+              recentConsumptionIntervals.length
+          )
+        )
+      : currentMedia?.kind === 'video'
+        ? Math.max(8_000, (currentVideoTiming?.duration ?? videoAdvancePlays * 8) * 1000)
+        : imageAdvanceSeconds * 1000
+  );
+  const smartRefillAheadTarget = $derived(
+    Math.min(
+      SMART_REFILL_MAX_AHEAD_POSTS,
+      Math.max(
+        SMART_REFILL_MIN_AHEAD_POSTS,
+        Math.ceil(SMART_REFILL_LOOKAHEAD_MS / Math.max(1_500, estimatedPostConsumptionMs))
+      )
+    )
+  );
+  const smartRefillAheadCount = $derived(Math.max(0, posts.length - currentIndex - 1));
+  const smartRefillSummary = $derived(
+    `${smartRefillAheadCount}/${smartRefillAheadTarget} ahead · ${formatDurationLabel(estimatedPostConsumptionMs)} per post`
+  );
   const autoAdvanceSuspended = $derived(
     autoAdvancePaused ||
     viewerUiEngaged ||
@@ -1425,6 +1642,26 @@
   });
 
   $effect(() => {
+    transitionTrackedPost(currentPost);
+    if (!currentPost) {
+      currentPostContextKey = '';
+      currentSubredditRecord = null;
+      currentPostEvents = [];
+    }
+  });
+
+  $effect(() => {
+    if (!afterCursor || loading || loadingMore || error || posts.length === 0) return;
+    if (smartRefillAheadCount > smartRefillAheadTarget) return;
+
+    const attemptKey = `${activeRouteKey}:${afterCursor}:${posts.length}`;
+    if (smartRefillAttemptKeys.has(attemptKey)) return;
+
+    smartRefillAttemptKeys.add(attemptKey);
+    void loadMore('smart-refill');
+  });
+
+  $effect(() => {
     if (!dev || typeof document === 'undefined') return;
     const suffix =
       error ? `ERR ${error.kind}` :
@@ -1521,7 +1758,7 @@
 
           if (nextPosition >= maxScroll - 2) {
             if (!loadingMore && afterCursor) {
-              void loadMore();
+              void loadMore('scroll');
               container.scrollTop = maxScroll - 2;
             } else if (!afterCursor) {
               container.scrollTop = 0;
@@ -1546,6 +1783,7 @@
   async function loadFeed(sub: string, time: string | undefined = listingTime, roulette = isRouletteMode) {
     const routeKey = getFeedRouteKey(sub, time, roulette);
     activeRouteKey = routeKey;
+    smartRefillAttemptKeys.clear();
     const restored = await hydrateFeedSnapshot(routeKey);
 
     loading = !restored;
@@ -1577,10 +1815,9 @@
     }
 
     afterCursor = result.data.data.after || null;
-    const normalized = await enrichRedgifsPosts(normalizeListingResponse(result.data.data.children));
-    const mediaPosts = normalized.filter((post) => post.media);
+    const mediaPosts = await normalizeListingMediaPosts(result.data);
 
-    await persistLoadedPosts(mediaPosts, getFeedPath(sub, time, roulette));
+    await persistLoadedPosts(mediaPosts, getFeedPath(sub, time, roulette), sub, time, roulette);
 
     const { mergedPosts, nextIndex } = mergePostsPreservingCurrent(mediaPosts, restored);
     posts = mergedPosts;
@@ -1597,13 +1834,14 @@
     }
 
     if (mediaPosts.length > 0) {
-      await recordEvent('impression', posts[currentIndex]);
+      void refreshCurrentPostContext(posts[currentIndex]);
     }
   }
 
-  async function loadMore() {
+  async function loadMore(trigger: 'manual' | 'smart-refill' | 'scroll' | 'auto-next' = 'manual') {
     if (loadingMore || !afterCursor) return;
     const routeKey = activeRouteKey;
+    lastLoadMoreTrigger = trigger;
     loadingMore = true;
 
     const spec = {
@@ -1621,10 +1859,15 @@
 
     if (result.ok) {
       afterCursor = result.data.data.after || null;
-      const normalized = await enrichRedgifsPosts(normalizeListingResponse(result.data.data.children));
-      const mediaPosts = normalized.filter((post) => post.media);
+      const mediaPosts = await normalizeListingMediaPosts(result.data);
 
-      await persistLoadedPosts(mediaPosts, getFeedPath(subredditParam, listingTime, isRouletteMode));
+      await persistLoadedPosts(
+        mediaPosts,
+        getFeedPath(subredditParam, listingTime, isRouletteMode),
+        subredditParam,
+        listingTime,
+        isRouletteMode
+      );
 
       const existingIds = new Set(posts.map((post) => post.id));
       posts = [...posts, ...mediaPosts.filter((post) => !existingIds.has(post.id))];
@@ -1734,61 +1977,210 @@
     }
   }
 
-  async function ensureSubreddit(
-    name: string,
-    discoveredVia?: string,
-    discoveryReason?: string,
-    isNsfwHint?: boolean
-  ) {
-    const existing = await getSubreddit(name);
-    if (!existing) {
-      await upsertSubreddit({
-        name: name.toLowerCase(),
-        prefixedName: `r/${name.toLowerCase()}`,
-        firstSeenAt: Date.now(),
-        localRating: 0,
-        isMuted: false,
-        isNsfw: isNsfwHint,
-        discoveryStatus: 'discovered',
-        discoveredVia,
-        discoveryReason,
-      });
-    } else {
-      const nextIsNsfw = existing.isNsfw === true
-        ? true
-        : isNsfwHint ?? existing.isNsfw;
-      if (!discoveredVia && !discoveryReason && nextIsNsfw === existing.isNsfw) return;
-
-      await upsertSubreddit({
-        ...existing,
-        isNsfw: nextIsNsfw,
-        discoveredVia: existing.discoveredVia ?? discoveredVia,
-        discoveryReason: existing.discoveryReason ?? discoveryReason,
-      });
-    }
-  }
-
-  async function recordEvent(type: string, post: PostRecord | undefined) {
+  async function recordEvent(type: SignalEventType, post: PostRecord | undefined, value?: number | string) {
     if (!post) return;
 
-    await addEvent({
-      type: type as Parameters<typeof addEvent>[0]['type'],
+    const ts = Date.now();
+    const event = {
+      type,
       postId: post.id,
       mediaId: post.media?.id,
       subreddit: post.subreddit,
-      ts: Date.now(),
+      value,
+      ts,
+    };
+
+    await addEvent(event);
+
+    if (currentPost?.id === post.id) {
+      currentPostEvents = [
+        ...currentPostEvents,
+        {
+          ...event,
+          id: `local:${type}:${ts}`,
+        },
+      ];
+    }
+  }
+
+  async function endTrackedPostView(post: PostRecord, reason: string) {
+    const sample = closeDwellSample(post, reason);
+    await Promise.all([
+      recordEvent('view_end', post, sample ? Math.round(sample.focusedMs) : undefined),
+      persistDwellSample(sample),
+    ]);
+  }
+
+  function transitionTrackedPost(nextPost: PostRecord | undefined) {
+    if (trackedPost?.id === nextPost?.id) return;
+
+    const previousPost = trackedPost;
+    trackedPost = nextPost;
+
+    if (previousPost) {
+      void endTrackedPostView(previousPost, nextPost ? 'selection-change' : 'viewer-empty');
+    }
+
+    if (!nextPost) return;
+
+    startDwellTracking(nextPost);
+    void recordEvent('impression', nextPost);
+    void recordEvent('view_start', nextPost);
+    void refreshCurrentPostContext(nextPost);
+  }
+
+  async function refreshCurrentPostContext(post: PostRecord) {
+    const contextKey = post.id;
+    currentPostContextKey = contextKey;
+    const [subreddit, events] = await Promise.all([
+      getSubreddit(post.subreddit),
+      getEventsForPost(post.id),
+    ]);
+
+    if (currentPostContextKey !== contextKey || currentPost?.id !== post.id) return;
+
+    currentSubredditRecord = subreddit ?? null;
+    currentPostEvents = events.sort((a, b) => a.ts - b.ts);
+  }
+
+  function sumNumericEvents(events: SignalEvent[], type: SignalEventType) {
+    return events.reduce((total, event) => (
+      event.type === type && typeof event.value === 'number'
+        ? total + event.value
+        : total
+    ), 0);
+  }
+
+  function countEvents(events: SignalEvent[], type: SignalEventType) {
+    return events.filter((event) => event.type === type).length;
+  }
+
+  function buildWhyPostInfo(
+    post: PostRecord | undefined,
+    subreddit: SubredditRecord | null,
+    events: SignalEvent[],
+    liveDwellMs: number
+  ): WhyPostInfo | undefined {
+    if (!post) return undefined;
+
+    const storedDwellMs = sumNumericEvents(events, 'dwell');
+    const dwellScore = sumNumericEvents(events, 'dwell_score');
+    const openCount = countEvents(events, 'open_reddit') + countEvents(events, 'open_media');
+    const ratingCount = countEvents(events, 'rating_explicit');
+    const details: WhyPostDetail[] = [
+      {
+        label: 'source',
+        value: `${routeSummary} · ${post.fetchedInRoute ?? pathInput}`,
+      },
+      {
+        label: 'position',
+        value: `${currentIndex + 1}/${posts.length}${afterCursor ? ' · more available' : ''}`,
+      },
+      {
+        label: 'subreddit',
+        value: `r/${post.subreddit} · rating ${formatSignedNumber(subreddit?.localRating ?? 0, 2)}`,
+        tone: (subreddit?.localRating ?? 0) > 0 ? 'positive' : (subreddit?.localRating ?? 0) < 0 ? 'negative' : 'muted',
+      },
+    ];
+
+    if (subreddit?.availabilityStatus) {
+      details.push({
+        label: 'availability',
+        value: subreddit.availabilityStatus,
+        tone: subreddit.availabilityStatus === 'available' ? 'positive' : 'warning',
+      });
+    }
+
+    details.push({
+      label: 'profile',
+      value: subreddit?.profileFetchedAt
+        ? `scanned ${new Date(subreddit.profileFetchedAt).toLocaleDateString()}`
+        : subreddit?.profileFetchError
+          ? `failed: ${subreddit.profileFetchError}`
+          : 'unscanned',
+      tone: subreddit?.profileFetchError ? 'warning' : subreddit?.profileFetchedAt ? 'positive' : 'muted',
     });
+
+    if (profileScanManager.currentName === post.subreddit) {
+      details.push({ label: 'scan queue', value: 'scanning now', tone: 'positive' });
+    } else if (profileScanManager.queue.includes(post.subreddit)) {
+      details.push({ label: 'scan queue', value: 'queued for profile scan', tone: 'positive' });
+    }
+
+    details.push({
+      label: 'media',
+      value: `${post.media?.kind?.replaceAll('_', ' ') ?? 'unknown'} · ${post.score} pts · ${post.numComments} comments`,
+    });
+
+    if (post.localRating) {
+      details.push({
+        label: 'post rating',
+        value: post.localRating === 1 ? 'liked' : 'downrated',
+        tone: post.localRating === 1 ? 'positive' : 'negative',
+      });
+    }
+
+    if (storedDwellMs > 0 || liveDwellMs > 0) {
+      details.push({
+        label: 'dwell',
+        value: `${formatDurationLabel(storedDwellMs)} logged${liveDwellMs > 0 ? ` · ${formatDurationLabel(liveDwellMs)} now` : ''}`,
+        tone: storedDwellMs + liveDwellMs >= getDwellExpectedMs(post) ? 'positive' : 'muted',
+      });
+    }
+
+    if (dwellScore !== 0) {
+      details.push({
+        label: 'passive score',
+        value: formatSignedNumber(dwellScore, 2),
+        tone: dwellScore > 0 ? 'positive' : 'negative',
+      });
+    }
+
+    if (openCount > 0 || ratingCount > 0) {
+      details.push({
+        label: 'actions',
+        value: `${openCount} opens · ${ratingCount} ratings`,
+        tone: openCount > 0 || ratingCount > 0 ? 'positive' : 'muted',
+      });
+    }
+
+    const summaryParts = [
+      `r/${post.subreddit}`,
+      post.fetchedInRoute ? 'local DB' : 'live feed',
+      `${post.media?.kind?.replaceAll('_', ' ') ?? 'media'}`,
+      `sub ${formatSignedNumber(subreddit?.localRating ?? 0, 1)}`,
+    ];
+
+    if (storedDwellMs + liveDwellMs > 0) {
+      summaryParts.push(`dwell ${formatDurationLabel(storedDwellMs + liveDwellMs)}`);
+    }
+
+    return {
+      summary: summaryParts.join(' · '),
+      details,
+    };
+  }
+
+  function noteForwardConsumption() {
+    const now = Date.now();
+    recentAdvanceTimes = [
+      ...recentAdvanceTimes.filter((ts) => now - ts <= SMART_REFILL_HISTORY_MS),
+      now,
+    ].slice(-14);
   }
 
   async function advance() {
     if (!currentPost) return;
 
+    const advancingPost = currentPost;
+    noteForwardConsumption();
     await markPostSeen(currentPost.id);
     seenIds = new Set([...seenIds, currentPost.id]);
     await recordEvent('advance_next', currentPost);
-    await recordEvent('view_end', currentPost);
 
     if (isRouletteMode && currentIndex + 1 >= rouletteSettings.imagesPerRound) {
+      await endTrackedPostView(advancingPost, 'roulette-round-complete');
+      trackedPost = undefined;
       await startNextRouletteRound();
       return;
     }
@@ -1799,26 +2191,24 @@
       syncCurrentSelectionState();
       scheduleFeedSnapshotSave();
       focusCurrentPostInActiveMode('smooth');
-      await recordEvent('impression', posts[currentIndex]);
-      await recordEvent('view_start', posts[currentIndex]);
 
-      if (currentIndex >= posts.length - (VIDEO_PRELOAD_AHEAD_POSTS + 5)) {
-        void loadMore();
+      if (posts.length - currentIndex - 1 <= smartRefillAheadTarget) {
+        void loadMore('manual');
       }
     } else if (isRouletteMode) {
+      await endTrackedPostView(advancingPost, 'roulette-feed-end');
+      trackedPost = undefined;
       await startNextRouletteRound();
     }
   }
 
   async function retreat() {
     if (currentIndex > 0) {
-      await recordEvent('view_end', currentPost);
       currentIndex--;
       galleryIndex = 0;
       syncCurrentSelectionState();
       scheduleFeedSnapshotSave();
       focusCurrentPostInActiveMode('smooth');
-      await recordEvent('impression', posts[currentIndex]);
     }
   }
 
@@ -1852,11 +2242,12 @@
     const newRating: 1 | undefined = existing?.localRating === 1 ? undefined : 1;
     await setPostRating(currentPost.id, newRating);
     posts = posts.map((post) => post.id === currentPost.id ? { ...post, localRating: newRating } : post);
-    await recordEvent('rating_explicit', currentPost);
+    await recordEvent('rating_explicit', currentPost, newRating ?? 0);
 
     const delta = (newRating ?? 0) - (existing?.localRating ?? 0);
     if (delta !== 0) {
       await updateSubredditRating(currentPost.subreddit, delta);
+      await refreshCurrentSubredditRecord(currentPost.subreddit);
     }
   }
 
@@ -1867,11 +2258,12 @@
     const newRating: -1 | undefined = existing?.localRating === -1 ? undefined : -1;
     await setPostRating(currentPost.id, newRating);
     posts = posts.map((post) => post.id === currentPost.id ? { ...post, localRating: newRating } : post);
-    await recordEvent('rating_explicit', currentPost);
+    await recordEvent('rating_explicit', currentPost, newRating ?? 0);
 
     const delta = (newRating ?? 0) - (existing?.localRating ?? 0);
     if (delta !== 0) {
       await updateSubredditRating(currentPost.subreddit, delta);
+      await refreshCurrentSubredditRecord(currentPost.subreddit);
     }
   }
 
@@ -1982,7 +2374,7 @@
 
       if (afterCursor) {
         const previousLength = posts.length;
-        await loadMore();
+        await loadMore('auto-next');
 
         if (posts.length > previousLength) {
           await stepForward();
@@ -2121,15 +2513,28 @@
       });
     }
 
+    const handleAttentionChange = () => syncDwellAttentionState();
+
     window.addEventListener('keydown', handleKeydown);
+    window.addEventListener('focus', handleAttentionChange);
+    window.addEventListener('blur', handleAttentionChange);
+    document.addEventListener('visibilitychange', handleAttentionChange);
 
     return () => {
+      if (trackedPost) {
+        const closingPost = trackedPost;
+        trackedPost = undefined;
+        void endTrackedPostView(closingPost, 'viewer-unmount');
+      }
       unsubscribeFromMediaCache();
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.removeEventListener('controllerchange', handleServiceWorkerControllerChange);
       }
       connection?.removeEventListener('change', refreshVideoPreloadBudget);
       window.removeEventListener('keydown', handleKeydown);
+      window.removeEventListener('focus', handleAttentionChange);
+      window.removeEventListener('blur', handleAttentionChange);
+      document.removeEventListener('visibilitychange', handleAttentionChange);
       cancelAnimationFrame(scrollSyncFrame);
       cancelAnimationFrame(masonrySyncFrame);
       clearTimeout(viewerUiDisengageTimer);
@@ -2229,6 +2634,7 @@
               isSeen={isSeen}
               loadedMedia={loadedMediaStates}
               imageCacheMode={mediaCacheRuntime}
+              whyPost={currentWhyPost}
               onadvance={advance}
               onretreat={retreat}
               onadvanceGallery={advanceGallery}
@@ -2537,6 +2943,7 @@
                 isSeen={isSeen}
                 loadedMedia={loadedMediaStates}
                 imageCacheMode={mediaCacheRuntime}
+                whyPost={currentWhyPost}
                 onadvance={advance}
                 onretreat={retreat}
                 onadvanceGallery={advanceGallery}
@@ -2587,8 +2994,9 @@
 	            <div class="nav-links">
 	              <a href="/r/all">all</a>
 	              <a href="/r/pics">pics</a>
-	              <a href="/r/videos">videos</a>
-	              <a href="/roulette">roulette</a>
+		              <a href="/r/videos">videos</a>
+		              <a href="/feed/random">feed</a>
+		              <a href="/roulette">roulette</a>
 	              <a href="/discover">discover</a>
 	              <a href="/admin">admin</a>
 	            </div>
@@ -2927,6 +3335,23 @@
 	              </div>
 	            </div>
 
+	            {#if currentWhyPost}
+	              <div class="status-panel-section status-panel-section--why">
+	                <div class="status-panel-heading">
+	                  <span>why this post</span>
+	                  <span>{currentWhyPost.summary}</span>
+	                </div>
+	                <div class="status-why-list" role="list" aria-label="Why this post">
+	                  {#each currentWhyPost.details.slice(0, 7) as detail}
+	                    <div class="status-why-row" data-tone={detail.tone ?? 'neutral'} role="listitem">
+	                      <span>{detail.label}</span>
+	                      <strong>{detail.value}</strong>
+	                    </div>
+	                  {/each}
+	                </div>
+	              </div>
+	            {/if}
+
 	            <div class="status-panel-section status-panel-section--auto">
 	              <div class="status-panel-heading">
 	                <span>media cache</span>
@@ -2941,6 +3366,10 @@
 	                <strong>{activeVideoPreloadCount}/{videoPreloadTargets.length} active</strong>
 	                <span>window</span>
 	                <strong>{VIDEO_PRELOAD_BEHIND_POSTS} back / {VIDEO_PRELOAD_AHEAD_POSTS} ahead</strong>
+	                <span>refill</span>
+	                <strong>{smartRefillSummary}</strong>
+	                <span>last pull</span>
+	                <strong>{lastLoadMoreTrigger}</strong>
 	              </div>
 	              <div class="status-panel-heading">
 	                <span>auto-next</span>
@@ -5131,6 +5560,10 @@
     gap: 8px;
   }
 
+  .status-panel-section--why {
+    grid-column: 1 / -1;
+  }
+
   .status-panel-heading {
     display: flex;
     justify-content: space-between;
@@ -5249,6 +5682,56 @@
     font-weight: 600;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .status-why-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .status-why-row {
+    display: grid;
+    grid-template-columns: 82px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    padding: 7px 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .status-why-row span {
+    color: #9fb0be;
+    font-size: 0.62rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+
+  .status-why-row strong {
+    min-width: 0;
+    color: #edf5fc;
+    font-size: 0.68rem;
+    font-weight: 600;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .status-why-row[data-tone='positive'] strong {
+    color: #8ce0a0;
+  }
+
+  .status-why-row[data-tone='negative'] strong {
+    color: #de7e7e;
+  }
+
+  .status-why-row[data-tone='warning'] strong {
+    color: #e0c489;
+  }
+
+  .status-why-row[data-tone='muted'] strong {
+    color: #aab4bd;
   }
 
   .auto-dock-toggle {
@@ -5412,6 +5895,10 @@
       width: auto;
       grid-template-columns: 1fr;
       border-radius: 0 0 14px 14px;
+    }
+
+    .status-why-list {
+      grid-template-columns: 1fr;
     }
 
     .debug-dock {

@@ -92,6 +92,7 @@
     <a href="/r/all" class="logo">SubGlass</a>
     <div class="nav-links">
       <a href="/r/all">all</a>
+      <a href="/feed/random">feed</a>
       <a href="/roulette">roulette</a>
       <a href="/discover" class="active">discover</a>
       <a href="/admin">admin</a>
