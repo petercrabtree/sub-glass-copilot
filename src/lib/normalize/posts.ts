@@ -44,6 +44,7 @@ function toVideoItem(videoData: Record<string, unknown>): MediaItem | undefined 
     mimeType: fallbackUrl ? 'video/mp4' : undefined,
     dashUrl,
     hlsUrl,
+    durationSeconds: asNumber(videoData.duration),
   };
 }
 
@@ -110,6 +111,7 @@ function extractRedgifsEmbedItem(postData: Record<string, unknown>): MediaItem |
       asVisualUrl(candidate.thumbnail) ||
       asVisualUrl(oembed?.thumbnail_url);
     const openUrl = sourceUrl || embedUrl;
+    const previewVideoItem = extractRedditVideoItem(candidate);
 
     return {
       url: posterUrl || openUrl,
@@ -117,8 +119,13 @@ function extractRedgifsEmbedItem(postData: Record<string, unknown>): MediaItem |
       embedUrl,
       provider: 'redgifs',
       externalId,
-      width: asNumber(oembed?.width) ?? asNumber(secureMediaEmbed?.width) ?? asNumber(mediaEmbed?.width),
-      height: asNumber(oembed?.height) ?? asNumber(secureMediaEmbed?.height) ?? asNumber(mediaEmbed?.height),
+      fallbackVideoUrl: previewVideoItem?.url,
+      mimeType: previewVideoItem?.mimeType,
+      dashUrl: previewVideoItem?.dashUrl,
+      hlsUrl: previewVideoItem?.hlsUrl,
+      durationSeconds: previewVideoItem?.durationSeconds,
+      width: previewVideoItem?.width ?? asNumber(oembed?.width) ?? asNumber(secureMediaEmbed?.width) ?? asNumber(mediaEmbed?.width),
+      height: previewVideoItem?.height ?? asNumber(oembed?.height) ?? asNumber(secureMediaEmbed?.height) ?? asNumber(mediaEmbed?.height),
     };
   }
 

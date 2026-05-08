@@ -58,6 +58,7 @@ export interface MediaItem {
   embedUrl?: string;
   provider?: 'redgifs' | string;
   externalId?: string;
+  fallbackVideoUrl?: string;
   durationSeconds?: number;
   hasAudio?: boolean;
 }

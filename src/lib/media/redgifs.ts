@@ -189,6 +189,13 @@ function choosePlaybackUrl(gif: RedgifsGif): string | undefined {
   return gif.urls?.hd || gif.urls?.sd || gif.urls?.silent;
 }
 
+function inferVideoMimeType(item: MediaItem): string | undefined {
+  if (item.mimeType) return item.mimeType;
+  return item.fallbackVideoUrl && /\.mp4(?:$|\?)/i.test(item.fallbackVideoUrl)
+    ? 'video/mp4'
+    : undefined;
+}
+
 function buildRedgifsVideoMedia(media: MediaGroup, item: MediaItem, gif: RedgifsGif): MediaGroup | undefined {
   const playbackUrl = choosePlaybackUrl(gif);
   if (!playbackUrl) return undefined;
@@ -204,7 +211,7 @@ function buildRedgifsVideoMedia(media: MediaGroup, item: MediaItem, gif: Redgifs
     embedUrl: gif.urls?.html ?? item.embedUrl,
     provider: 'redgifs',
     externalId,
-    durationSeconds: gif.duration,
+    durationSeconds: gif.duration ?? item.durationSeconds,
     hasAudio: gif.hasAudio,
   };
 
@@ -213,6 +220,27 @@ function buildRedgifsVideoMedia(media: MediaGroup, item: MediaItem, gif: Redgifs
     kind: 'video',
     items: [nextItem],
     thumbnailUrl: gif.urls?.poster || gif.urls?.thumbnail || media.thumbnailUrl || item.url,
+  };
+}
+
+function buildRedgifsPreviewVideoMedia(media: MediaGroup, item: MediaItem): MediaGroup | undefined {
+  if (!item.fallbackVideoUrl) return undefined;
+
+  const externalId = getRedgifsId(item)?.toLowerCase();
+  const nextItem: MediaItem = {
+    ...item,
+    url: item.fallbackVideoUrl,
+    mimeType: inferVideoMimeType(item),
+    openUrl: item.openUrl ?? (externalId ? `https://www.redgifs.com/watch/${externalId}` : undefined),
+    provider: 'redgifs',
+    externalId,
+  };
+
+  return {
+    ...media,
+    kind: 'video',
+    items: [nextItem],
+    thumbnailUrl: media.thumbnailUrl || item.url,
   };
 }
 
@@ -264,6 +292,12 @@ async function resolveRedgifsMedia(media: MediaGroup): Promise<RedgifsResolveRes
 
   const originBlockReason = getOriginBlockReason();
   if (originBlockReason) {
+    const previewFallback = buildRedgifsPreviewVideoMedia(media, item);
+    if (previewFallback) {
+      console.info('[redgifs]', 'using Reddit preview video fallback', id, originBlockReason);
+      return { ok: true, media: previewFallback };
+    }
+
     console.warn('[redgifs]', 'fallback to iframe', id, originBlockReason);
     return { ok: false, reason: originBlockReason, media };
   }
@@ -271,12 +305,26 @@ async function resolveRedgifsMedia(media: MediaGroup): Promise<RedgifsResolveRes
   try {
     const gif = await getGif(id);
     const resolved = buildRedgifsVideoMedia(media, item, gif);
-    if (!resolved) return { ok: false, reason: 'missing Redgifs playback URL', media };
+    if (!resolved) {
+      const previewFallback = buildRedgifsPreviewVideoMedia(media, item);
+      if (previewFallback) {
+        console.info('[redgifs]', 'using Reddit preview video fallback', id, 'missing Redgifs playback URL');
+        return { ok: true, media: previewFallback };
+      }
+
+      return { ok: false, reason: 'missing Redgifs playback URL', media };
+    }
 
     console.info('[redgifs]', 'resolved', id, `${gif.duration ?? '?'}s`, resolved.items[0]?.url);
     return { ok: true, media: resolved };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    const previewFallback = buildRedgifsPreviewVideoMedia(media, item);
+    if (previewFallback) {
+      console.info('[redgifs]', 'using Reddit preview video fallback', id, reason);
+      return { ok: true, media: previewFallback };
+    }
+
     console.warn('[redgifs]', 'fallback to iframe', id, reason);
     return { ok: false, reason, media };
   }
