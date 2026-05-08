@@ -168,12 +168,13 @@ function getSourceStatsMap(stats: SourceStats[]): Map<string, SourceStats> {
 
 export async function refillFeedSources(feedName: string): Promise<FeedRefillResult> {
   const recipe = await ensureFeedRecipe(feedName);
-  const [subreddits, sourceStats] = await Promise.all([
+  const [posts, subreddits, sourceStats] = await Promise.all([
+    getAllPosts(),
     getAllSubreddits(),
     getAllSourceStats(),
   ]);
   const statsByKey = getSourceStatsMap(sourceStats);
-  const plans = planFeedSourceFetches(subreddits, recipe, sourceStats);
+  const plans = planFeedSourceFetches(subreddits, recipe, sourceStats, [], posts);
   const batchId = `${recipe.id}:${Date.now()}`;
   const result: FeedRefillResult = {
     attempted: plans.length,
@@ -251,4 +252,3 @@ export async function setFeedRunLocked(run: FeedRun, locked: boolean): Promise<F
   });
   return nextRun;
 }
-

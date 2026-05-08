@@ -1,5 +1,8 @@
 import generatedSmokeFixture from './generated-smoke-fixture.json';
-import { DEFAULT_SMOKE_FIXTURE_PATHNAME } from './smoke-config.mjs';
+import {
+  DEFAULT_SMOKE_ABOUT_FIXTURE_PATHNAME,
+  DEFAULT_SMOKE_FIXTURE_PATHNAME,
+} from './smoke-config.mjs';
 
 type RedditListingChild = {
   kind: 't3';
@@ -13,7 +16,9 @@ type GeneratedSmokeFixture = {
       subreddit: string;
       over18: boolean;
     }>;
+    aboutFixturePathname?: string;
   };
+  about?: unknown;
   listing: unknown;
 };
 
@@ -189,6 +194,10 @@ export const mockRedditFixtures: RedditFixtureMap = {
   '/r/all/.json': listing,
   '/r/videos/.json': listing,
   [DEFAULT_SMOKE_FIXTURE_PATHNAME]: smokeFixture.listing,
+  [DEFAULT_SMOKE_ABOUT_FIXTURE_PATHNAME]: smokeFixture.about ?? createAbout('nsfw'),
+  ...(smokeFixture.source.aboutFixturePathname
+    ? { [smokeFixture.source.aboutFixturePathname]: smokeFixture.about ?? createAbout('nsfw') }
+    : {}),
   '/r/pics/about/.json': createAbout('pics'),
   '/r/all/about/.json': createAbout('all'),
   '/r/videos/about/.json': createAbout('videos'),

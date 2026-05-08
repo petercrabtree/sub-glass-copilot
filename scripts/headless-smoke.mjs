@@ -68,6 +68,7 @@ const viewerPath = getStringArg(
   DEFAULT_SMOKE_ROUTE_PATH
 );
 const ROUTES = [
+  { name: 'feed-random', path: '/feed/random', kind: 'feed' },
   { name: 'viewer-default', path: viewerPath, kind: 'viewer' },
   { name: 'discover', path: '/discover', kind: 'discover' },
   { name: 'admin', path: '/admin', kind: 'admin' }
@@ -256,6 +257,8 @@ async function captureRoute(route, iterationDir) {
     let result;
     if (route.kind === 'viewer') {
       result = await captureViewerRoute(page, route, routePrefix, timeoutMs);
+    } else if (route.kind === 'feed') {
+      result = await captureFeedRoute(page, route, routePrefix, timeoutMs);
     } else if (route.kind === 'discover') {
       result = await captureDiscoverRoute(page, route, routePrefix, timeoutMs);
     } else {
@@ -353,6 +356,47 @@ async function captureViewerRoute(page, route, routePrefix, routeTimeoutMs) {
     locationPath: initialState.locationPath,
     state: initialState,
     interaction,
+    primaryScreenshot: relativePath(primaryScreenshotPath)
+  };
+}
+
+async function captureFeedRoute(page, route, routePrefix, routeTimeoutMs) {
+  const response = await page.goto(new URL(route.path, baseUrl).toString(), {
+    waitUntil: 'domcontentloaded',
+    timeout: routeTimeoutMs
+  });
+
+  await page.waitForSelector('.feed-page', { timeout: routeTimeoutMs });
+  await page.waitForFunction(() => {
+    const pageRoot = document.querySelector('.feed-page');
+    if (!pageRoot) return false;
+    const status = pageRoot.getAttribute('data-feed-status') ?? '';
+    return status === 'ready' || status === 'empty' || status === 'error';
+  }, { timeout: routeTimeoutMs });
+
+  await waitForOptionalSelector(
+    page,
+    '.feed-viewer .media-img.loaded, .feed-viewer .media-video, .feed-viewer .media-embed-frame, .feed-viewer .media-error, .feed-state.empty, .feed-state.error',
+    5000
+  );
+
+  await page.mouse.move(120, 120);
+
+  const state = await page.evaluate(collectFeedState);
+  const primaryScreenshotPath = `${routePrefix}.png`;
+  await page.screenshot({ path: primaryScreenshotPath, fullPage: true });
+
+  return {
+    ok:
+      state.feedStatus === 'ready' &&
+      state.totalPosts > 0 &&
+      state.sourceCount > 0 &&
+      (state.hasImage || state.hasVideo || state.mediaErrorVisible) &&
+      !state.emptyVisible &&
+      !state.errorVisible,
+    response: serializeResponse(response),
+    locationPath: state.locationPath,
+    state,
     primaryScreenshot: relativePath(primaryScreenshotPath)
   };
 }
@@ -643,6 +687,32 @@ function collectViewerState() {
     errorSummary: document.querySelector('.error-summary')?.textContent?.trim() ?? null,
     loadingVisible: Boolean(document.querySelector('.loading')),
     emptyVisible: Boolean(document.querySelector('.empty'))
+  };
+}
+
+function collectFeedState() {
+  const pageRoot = document.querySelector('.feed-page');
+  const counter = document.querySelector('.counter')?.textContent?.trim() ?? null;
+  const summary = document.querySelector('.feed-summary')?.textContent?.trim() ?? null;
+  const counterMatch = counter?.match(/(\d+)\s*\/\s*(\d+)/);
+  const sourceMatch = summary?.match(/(\d+)\s+sources?/);
+
+  return {
+    locationPath: window.location.pathname,
+    documentTitle: document.title,
+    feedStatus: pageRoot?.getAttribute('data-feed-status') ?? null,
+    summary,
+    counter,
+    totalPosts: counterMatch ? Number.parseInt(counterMatch[2], 10) : 0,
+    sourceCount: sourceMatch ? Number.parseInt(sourceMatch[1], 10) : 0,
+    postTitle: document.querySelector('.post-title')?.textContent?.trim() ?? null,
+    subreddit: document.querySelector('.subreddit')?.textContent?.trim() ?? null,
+    hasImage: Boolean(document.querySelector('.feed-viewer img.media-img')),
+    hasVideo: Boolean(document.querySelector('.feed-viewer video.media-video, .feed-viewer iframe.media-embed-frame')),
+    mediaErrorVisible: Boolean(document.querySelector('.feed-viewer .media-error')),
+    emptyVisible: Boolean(document.querySelector('.feed-state.empty')),
+    errorVisible: Boolean(document.querySelector('.feed-state.error')),
+    errorText: document.querySelector('.feed-state.error')?.textContent?.trim() ?? null
   };
 }
 

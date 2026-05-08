@@ -76,6 +76,7 @@
   const totalItems = $derived(currentMedia?.items?.length ?? 0);
   const imageCacheMode = $derived<MediaCacheRuntimeState>('inactive');
   const queueHealth = $derived(formatQueueHealth());
+  const feedStatus = $derived(error ? 'error' : loading ? 'loading' : posts.length > 0 ? 'ready' : 'empty');
   const loadedMediaStates = $derived<LoadedMediaQueueItem[]>(
     posts.map((post, index) => {
       const item = items[index];
@@ -379,7 +380,7 @@
   <title>SubGlass Feed · {feedName}</title>
 </svelte:head>
 
-<div class="feed-page">
+<div class="feed-page" data-feed-status={feedStatus}>
   <nav class="feed-rail">
     <a href="/r/all" class="brand">SubGlass</a>
     <a href="/feed/random" class:active={feedName === 'random'}>random</a>

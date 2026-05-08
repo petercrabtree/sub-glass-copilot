@@ -2,10 +2,22 @@ import {
   chooseRouletteSubreddits,
   getRouletteCandidates,
 } from '$lib/discovery/roulette';
-import { getFeedSourceKey, isFeedSourceAvailable, type FeedSourceSpec } from '$lib/feed/source';
-import type { FeedRecipe, SourceStats, SubredditRecord, SubredditRouletteSettings } from '$lib/types';
+import {
+  getFeedSourceKey,
+  isFeedSourceAvailable,
+  normalizeSourceSubreddit,
+  type FeedSourceSpec,
+} from '$lib/feed/source';
+import type {
+  FeedRecipe,
+  PostRecord,
+  SourceStats,
+  SubredditRecord,
+  SubredditRouletteSettings,
+} from '$lib/types';
 
 const SOURCE_REFETCH_COOLDOWN_MS = 30 * 60 * 1000;
+const DEFAULT_BOOTSTRAP_SOURCE = 'nsfw';
 
 function getRecipeRouletteWeights(recipe: FeedRecipe): Pick<
   SubredditRouletteSettings,
@@ -41,26 +53,94 @@ function getStatsMap(sourceStats: SourceStats[]): Map<string, SourceStats> {
   return new Map(sourceStats.map((stats) => [stats.sourceKey, stats]));
 }
 
+function createBootstrapSourceSubreddit(): SubredditRecord {
+  return {
+    name: DEFAULT_BOOTSTRAP_SOURCE,
+    prefixedName: `r/${DEFAULT_BOOTSTRAP_SOURCE}`,
+    firstSeenAt: Date.now(),
+    localRating: 0,
+    isMuted: false,
+    isNsfw: true,
+    discoveryStatus: 'discovered',
+    discoveredVia: 'feed-bootstrap',
+    discoveryReason: 'default local feed source',
+  };
+}
+
+function isFeedNsfwCompatible(sub: SubredditRecord, recipe: FeedRecipe): boolean {
+  if (recipe.nsfwMode === 'yes') return true;
+  if (recipe.nsfwMode === 'no') return sub.isNsfw !== true;
+  return sub.isNsfw !== false;
+}
+
+function mergePostDerivedSubreddits(
+  subreddits: SubredditRecord[],
+  posts: PostRecord[] = []
+): SubredditRecord[] {
+  const byName = new Map(subreddits.map((sub) => [normalizeSourceSubreddit(sub.name), sub]));
+
+  for (const post of posts) {
+    const name = normalizeSourceSubreddit(post.subreddit);
+    if (!name || name === 'all') continue;
+
+    const existing = byName.get(name);
+    if (existing) {
+      if (post.isNsfw && existing.isNsfw !== true) {
+        byName.set(name, { ...existing, isNsfw: true });
+      } else if (existing.isNsfw === undefined) {
+        byName.set(name, { ...existing, isNsfw: post.isNsfw });
+      }
+      continue;
+    }
+
+    byName.set(name, {
+      name,
+      prefixedName: `r/${name}`,
+      firstSeenAt: post.createdAt || Date.now(),
+      localRating: 0,
+      isMuted: false,
+      isNsfw: post.isNsfw,
+      discoveryStatus: 'discovered',
+      discoveredVia: 'local-posts',
+      discoveryReason: 'derived from local post inventory',
+    });
+  }
+
+  return [...byName.values()];
+}
+
 export function getEligibleFeedSourceCount(
   subreddits: SubredditRecord[],
   recipe: FeedRecipe
 ): number {
-  return getRouletteCandidates(subreddits.filter(isFeedSourceAvailable), asRouletteSettings(recipe)).length;
+  const eligible = getRouletteCandidates(
+    subreddits
+      .filter(isFeedSourceAvailable)
+      .filter((sub) => isFeedNsfwCompatible(sub, recipe)),
+    { ...asRouletteSettings(recipe), nsfwMode: 'yes' }
+  );
+
+  if (eligible.length > 0 || recipe.nsfwMode === 'no') return eligible.length;
+  return 1;
 }
 
 export function planFeedSourceFetches(
   subreddits: SubredditRecord[],
   recipe: FeedRecipe,
   sourceStats: SourceStats[],
-  avoidSubreddits: string[] = []
+  avoidSubreddits: string[] = [],
+  posts: PostRecord[] = []
 ): FeedSourceSpec[] {
   const now = Date.now();
   const statsByKey = getStatsMap(sourceStats);
   const settings = asRouletteSettings(recipe);
   const avoided = new Set(avoidSubreddits.map((name) => name.toLowerCase()));
-  const candidates = subreddits
+  const sourcePool = mergePostDerivedSubreddits(subreddits, posts)
     .filter(isFeedSourceAvailable)
-    .filter((sub) => !avoided.has(sub.name.toLowerCase()))
+    .filter((sub) => isFeedNsfwCompatible(sub, recipe))
+    .filter((sub) => !avoided.has(sub.name.toLowerCase()));
+  const fallbackPool = recipe.nsfwMode === 'no' ? [] : [createBootstrapSourceSubreddit()];
+  const candidates = (sourcePool.length > 0 ? sourcePool : fallbackPool)
     .filter((sub) => {
       const sourceKey = getFeedSourceKey({
         subreddit: sub.name,
@@ -69,11 +149,17 @@ export function planFeedSourceFetches(
       });
       const stats = statsByKey.get(sourceKey);
       if (stats?.cooldownUntil && stats.cooldownUntil > now) return false;
-      if (stats?.lastFetchedAt && now - stats.lastFetchedAt < SOURCE_REFETCH_COOLDOWN_MS) return false;
+      if (
+        stats?.lastFetchedAt &&
+        !stats.afterCursor &&
+        now - stats.lastFetchedAt < SOURCE_REFETCH_COOLDOWN_MS
+      ) {
+        return false;
+      }
       return true;
     });
 
-  const selected = chooseRouletteSubreddits(candidates, settings);
+  const selected = chooseRouletteSubreddits(candidates, { ...settings, nsfwMode: 'yes' });
 
   return selected.map((sub) => ({
     subreddit: sub.name,

@@ -8,7 +8,12 @@ import type {
   SourceStats,
   SubredditRecord,
 } from '$lib/types';
-import { getSourceYieldScore } from '$lib/feed/source';
+import {
+  getFeedSourceKey,
+  getFeedSourceLabel,
+  getFeedSourceRoutePath,
+  getSourceYieldScore,
+} from '$lib/feed/source';
 
 export interface FeedCandidate {
   post: PostRecord;
@@ -72,6 +77,37 @@ function chooseBestSource(sources: PostSource[] | undefined): PostSource | undef
   )[0];
 }
 
+function createLocalPostSourceFallback(post: PostRecord, recipe: FeedRecipe): PostSource {
+  const sourceSpec = {
+    subreddit: post.subreddit,
+    listingSort: recipe.listingSort,
+    listingTime: recipe.listingTime,
+  };
+  const sourceKey = getFeedSourceKey(sourceSpec);
+  return {
+    id: `${post.id}:${sourceKey}:local`,
+    postId: post.id,
+    sourceKey,
+    sourceLabel: getFeedSourceLabel(sourceSpec),
+    subreddit: post.subreddit,
+    routePath: post.fetchedInRoute ?? getFeedSourceRoutePath(sourceSpec),
+    listingSort: recipe.listingSort,
+    listingTime: recipe.listingTime,
+    fetchedAt: post.createdAt,
+    isMultireddit: false,
+  };
+}
+
+function getCandidateSource(post: PostRecord, recipe: FeedRecipe, sourcesByPost: Map<string, PostSource[]>): PostSource {
+  return chooseBestSource(sourcesByPost.get(post.id)) ?? createLocalPostSourceFallback(post, recipe);
+}
+
+function isRecipeNsfwMatch(post: PostRecord, recipe: FeedRecipe): boolean {
+  if (recipe.nsfwMode === 'yes') return true;
+  if (recipe.nsfwMode === 'no') return !post.isNsfw;
+  return post.isNsfw;
+}
+
 function getSourceRankScore(source: PostSource | undefined): number {
   if (!source || source.listingPosition === undefined) return 0;
   return Math.max(0, 6 - Math.log2(source.listingPosition + 2) * 1.4);
@@ -113,11 +149,11 @@ export function scoreFeedCandidates(context: FeedScoringContext): FeedCandidate[
   const statsBySource = new Map(context.sourceStats.map((stats) => [stats.sourceKey, stats]));
 
   return context.posts
-    .filter((post) => post.media && !post.isSelf)
+    .filter((post) => post.media && !post.isSelf && isRecipeNsfwMatch(post, context.recipe))
     .map((post): FeedCandidate | null => {
       const details: FeedScoreDetail[] = [];
       const sub = subredditByName.get(post.subreddit);
-      const source = chooseBestSource(sourcesByPost.get(post.id));
+      const source = getCandidateSource(post, context.recipe, sourcesByPost);
       const postEvents = eventsByPost.get(post.id) ?? [];
       let score = 0;
 
@@ -234,4 +270,3 @@ export function scoreFeedCandidates(context: FeedScoringContext): FeedCandidate[
     .filter((candidate): candidate is FeedCandidate => candidate !== null)
     .sort((a, b) => b.score - a.score || b.post.createdAt - a.post.createdAt);
 }
-

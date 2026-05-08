@@ -2,6 +2,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import {
+  DEFAULT_SMOKE_ABOUT_FIXTURE_PATHNAME,
+  DEFAULT_SMOKE_ABOUT_SOURCE_URL,
   DEFAULT_SMOKE_FIXTURE_PATHNAME,
   DEFAULT_SMOKE_FIXTURE_POST_COUNT,
   DEFAULT_SMOKE_FIXTURE_SOURCE_LIMIT,
@@ -13,7 +15,8 @@ import {
 
 const OUTPUT_PATH = path.join(process.cwd(), 'dev', 'generated-smoke-fixture.json');
 const USER_AGENT =
-  process.env.SMOKE_FIXTURE_USER_AGENT || 'subglass-smoke/1.0 (contact: local-dev)';
+  process.env.SMOKE_FIXTURE_USER_AGENT ||
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 const SOURCE_LIMIT = readPositiveIntegerArg('--limit', DEFAULT_SMOKE_FIXTURE_SOURCE_LIMIT);
 const FIXTURE_POST_COUNT = readPositiveIntegerArg('--count', DEFAULT_SMOKE_FIXTURE_POST_COUNT);
 const sourceUrl = buildSourceUrl(SOURCE_LIMIT);
@@ -31,18 +34,21 @@ const GALLERY_ASSET_PAIRS = [
 ];
 
 async function main() {
-  const response = await fetch(sourceUrl, {
-    headers: {
-      accept: 'application/json',
-      'user-agent': USER_AGENT
-    }
-  });
+  const [response, aboutResponse] = await Promise.all([
+    fetchRedditJson(sourceUrl),
+    fetchRedditJson(DEFAULT_SMOKE_ABOUT_SOURCE_URL)
+  ]);
 
   if (!response.ok) {
     throw new Error(`Fixture refresh failed with HTTP ${response.status} ${response.statusText}`);
   }
 
+  if (!aboutResponse.ok) {
+    throw new Error(`About fixture refresh failed with HTTP ${aboutResponse.status} ${aboutResponse.statusText}`);
+  }
+
   const payload = await response.json();
+  const aboutPayload = await aboutResponse.json();
   const children = Array.isArray(payload?.data?.children) ? payload.data.children : [];
   const sourcePosts = children
     .filter((child) => child?.kind === 't3' && child.data)
@@ -64,8 +70,11 @@ async function main() {
       subredditPath: DEFAULT_SMOKE_SUBREDDIT_PATH,
       listingPath: DEFAULT_SMOKE_SORT_PATH,
       fixturePathname: DEFAULT_SMOKE_FIXTURE_PATHNAME,
+      aboutSourceUrl: DEFAULT_SMOKE_ABOUT_SOURCE_URL,
+      aboutFixturePathname: DEFAULT_SMOKE_ABOUT_FIXTURE_PATHNAME,
       posts: sourcePosts
     },
+    about: aboutPayload,
     listing: {
       kind: 'Listing',
       data: {
@@ -83,6 +92,16 @@ async function main() {
   console.log(
     `Wrote ${path.relative(process.cwd(), OUTPUT_PATH)} from ${sourcePosts.length} posts in ${DEFAULT_SMOKE_ROUTE_PATH}`
   );
+}
+
+function fetchRedditJson(url) {
+  return fetch(url, {
+    headers: {
+      accept: 'application/json',
+      'accept-language': 'en-US,en;q=0.9',
+      'user-agent': USER_AGENT
+    }
+  });
 }
 
 function normalizeSourcePost(data, index) {
