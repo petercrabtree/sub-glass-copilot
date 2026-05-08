@@ -764,6 +764,7 @@
 
   function shouldCheckRouteMembersAfterListingError(sub: string, error: RedditRequestError) {
     if (error.tooFast || error.kind !== 'http') return false;
+    if (error.rateLimitedUntil && error.rateLimitedUntil > Date.now()) return false;
     if (error.status !== 403 && error.status !== 404) return false;
     return extractSubreddits(sub).some((name) => name !== 'all');
   }
@@ -1192,6 +1193,7 @@
 
     const spec = { path: `/r/${sub}`, subreddits: extractSubreddits(sub), time };
     const result = await fetchListing(spec, 25);
+    if (routeKey !== activeRouteKey || routeKey !== lastRouteLoadKey) return;
     syncRedditDebug();
     if (!result.ok) {
       console.error('Failed to load feed', result.error);
@@ -1233,6 +1235,7 @@
 
   async function loadMore() {
     if (loadingMore || !afterCursor) return;
+    const routeKey = activeRouteKey;
     loadingMore = true;
 
     const spec = {
@@ -1242,6 +1245,10 @@
       time: listingTime,
     };
     const result = await fetchListing(spec, 25);
+    if (routeKey !== activeRouteKey) {
+      loadingMore = false;
+      return;
+    }
     syncRedditDebug();
 
     if (result.ok) {
