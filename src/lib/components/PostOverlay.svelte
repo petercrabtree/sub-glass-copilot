@@ -2,6 +2,7 @@
   import { ExternalLink, Image as ImageIcon, ThumbsDown, ThumbsUp } from 'lucide-svelte';
   import type { MediaKind, PostRecord } from '$lib/types';
   import type { MediaCacheRuntimeState, MediaCacheState } from '$lib/service-worker/media-cache';
+  import type { VideoPreloadState } from '$lib/media/video-preload';
   import {
     VIEWER_SHORTCUT_GROUPS,
     formatViewerShortcutKeys,
@@ -9,6 +10,7 @@
 
   type OverlayNavAction = 'retreat' | 'advance' | 'gallery_back' | 'gallery_forward' | 'none';
   type ViewerUiMode = 'full' | 'mini' | 'hidden';
+  type LoadedVideoPreloadState = VideoPreloadState | 'skipped' | 'not-planned' | 'visible';
   type OverlayNavZone = {
     id: string;
     className: string;
@@ -28,6 +30,10 @@
     previewUrl?: string;
     cacheUrl?: string;
     cacheState: MediaCacheState;
+    videoPreloadState: LoadedVideoPreloadState;
+    videoPreloadBufferedSeconds?: number;
+    videoPreloadDurationSeconds?: number;
+    videoPreloadError?: string;
   };
 
   let {
@@ -163,6 +169,38 @@
     }
   }
 
+  function formatVideoSeconds(seconds: number | undefined): string {
+    if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) return '0s';
+    if (seconds < 10) return `${seconds.toFixed(1)}s`;
+    return `${Math.round(seconds)}s`;
+  }
+
+  function formatLoadedMediaVideoPreloadState(item: Pick<
+    LoadedMediaItem,
+    'videoPreloadState' | 'videoPreloadBufferedSeconds' | 'videoPreloadError'
+  >) {
+    switch (item.videoPreloadState) {
+      case 'visible':
+        return 'video visible';
+      case 'buffered':
+        return `video buffered ${formatVideoSeconds(item.videoPreloadBufferedSeconds)}`;
+      case 'ready':
+        return 'video ready';
+      case 'metadata':
+        return 'video metadata';
+      case 'warming':
+        return 'video warming';
+      case 'queued':
+        return 'video queued';
+      case 'not-planned':
+        return 'video not planned';
+      case 'error':
+        return item.videoPreloadError ? `video error: ${item.videoPreloadError}` : 'video error';
+      case 'skipped':
+        return 'n/a';
+    }
+  }
+
   function describeLoadedMedia(item: LoadedMediaItem) {
     const parts = [
       `#${item.index + 1}`,
@@ -173,6 +211,11 @@
     const cacheStateLabel = formatLoadedMediaCacheState(item.cacheState);
     if (cacheStateLabel !== 'n/a') {
       parts.push(cacheStateLabel);
+    }
+
+    const videoPreloadStateLabel = formatLoadedMediaVideoPreloadState(item);
+    if (videoPreloadStateLabel !== 'n/a') {
+      parts.push(videoPreloadStateLabel);
     }
 
     if (item.itemCount > 1) {
@@ -289,6 +332,7 @@
                     data-kind={item.kind}
                     data-status={item.status}
                     data-cache={item.cacheState}
+                    data-video-preload={item.videoPreloadState}
                     title={describeLoadedMedia(item)}
                   ></span>
                 {/each}
@@ -327,6 +371,7 @@
                       data-current={item.index === postIndex}
                       data-status={item.status}
                       data-cache={item.cacheState}
+                      data-video-preload={item.videoPreloadState}
                       aria-current={item.index === postIndex ? 'true' : undefined}
                       aria-label={`Jump to ${describeLoadedMedia(item)}`}
                       title={`Jump to ${describeLoadedMedia(item)}`}
@@ -345,6 +390,7 @@
                           data-kind={item.kind}
                           data-status={item.status}
                           data-cache={item.cacheState}
+                          data-video-preload={item.videoPreloadState}
                         ></span>
                         <span class="queue-index">{item.index + 1}</span>
                       </span>
@@ -352,6 +398,12 @@
                         <span class="queue-item-title">{item.title}</span>
                         <span class="queue-item-meta">
                           {formatLoadedMediaKind(item.kind)} · {item.status}
+                          {#if item.cacheState !== 'skipped'}
+                            · image {formatLoadedMediaCacheState(item.cacheState)}
+                          {/if}
+                          {#if item.videoPreloadState !== 'skipped'}
+                            · {formatLoadedMediaVideoPreloadState(item)}
+                          {/if}
                           {#if item.itemCount > 1}
                             · {item.itemCount} items
                           {/if}
@@ -369,6 +421,11 @@
                         <span class="queue-badge cache" data-cache={item.cacheState}>
                           {formatLoadedMediaCacheState(item.cacheState)}
                         </span>
+                        {#if item.videoPreloadState !== 'skipped'}
+                          <span class="queue-badge video" data-video-preload={item.videoPreloadState}>
+                            {formatLoadedMediaVideoPreloadState(item)}
+                          </span>
+                        {/if}
                       </span>
                       {#if previewedLoadItemId === item.id && item.previewUrl}
                         <span class="queue-preview-popover">
@@ -673,6 +730,10 @@
     width: 12px;
     border-radius: 4px;
   }
+  .load-chip[data-kind='video'] {
+    width: 14px;
+    border-radius: 5px;
+  }
   .load-chip.current {
     transform: translateY(-1px);
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
@@ -706,6 +767,26 @@
   .load-chip[data-cache='unsupported'],
   .load-chip[data-cache='skipped'] {
     opacity: 0.52;
+  }
+  .load-chip[data-kind='video']::before {
+    content: '';
+    position: absolute;
+    inset: 2px 2px auto;
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.26);
+  }
+  .load-chip[data-video-preload='warming']::before,
+  .load-chip[data-video-preload='metadata']::before {
+    background: rgba(232, 189, 95, 0.86);
+  }
+  .load-chip[data-video-preload='ready']::before,
+  .load-chip[data-video-preload='buffered']::before,
+  .load-chip[data-video-preload='visible']::before {
+    background: rgba(113, 212, 136, 0.92);
+  }
+  .load-chip[data-video-preload='error']::before {
+    background: rgba(222, 126, 126, 0.92);
   }
   .load-chip::after {
     content: '';
@@ -896,6 +977,22 @@
   .queue-badge.cache[data-cache='unsupported'],
   .queue-badge.cache[data-cache='skipped'] {
     color: #9da6ae;
+  }
+  .queue-badge.video[data-video-preload='warming'],
+  .queue-badge.video[data-video-preload='metadata'] {
+    color: #e0c489;
+  }
+  .queue-badge.video[data-video-preload='ready'],
+  .queue-badge.video[data-video-preload='buffered'],
+  .queue-badge.video[data-video-preload='visible'] {
+    color: #8ce0a0;
+  }
+  .queue-badge.video[data-video-preload='queued'],
+  .queue-badge.video[data-video-preload='not-planned'] {
+    color: #cbd5df;
+  }
+  .queue-badge.video[data-video-preload='error'] {
+    color: #de7e7e;
   }
   .queue-preview-popover {
     position: absolute;

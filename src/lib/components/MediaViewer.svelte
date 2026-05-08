@@ -134,6 +134,7 @@
         loop
         controls
         playsinline
+        preload="auto"
         class="media-video"
         onplay={onVideoPlay}
         onpause={onVideoPause}

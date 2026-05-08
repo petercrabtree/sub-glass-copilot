@@ -32,6 +32,13 @@
   import MediaViewer from '$lib/components/MediaViewer.svelte';
   import PostOverlay from '$lib/components/PostOverlay.svelte';
   import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
+  import VideoPreloadPool from '$lib/components/VideoPreloadPool.svelte';
+  import {
+    createVideoPreloadKey,
+    type VideoPreloadState,
+    type VideoPreloadTarget,
+    type VideoPreloadUpdate,
+  } from '$lib/media/video-preload';
   import {
     VIEWER_SHORTCUT_GROUPS,
     getViewerActionForKey,
@@ -47,6 +54,7 @@
   } from '$lib/service-worker/media-cache';
 
   type LoadedMediaStatus = 'queued' | 'seen' | 'loading' | 'ready' | 'error';
+  type LoadedVideoPreloadState = VideoPreloadState | 'skipped' | 'not-planned' | 'visible';
   type DisplayMode = 'fill' | 'scroll' | 'masonry' | 'wild' | 'wild2' | 'wild3';
   type VideoTiming = {
     currentTime: number;
@@ -79,6 +87,12 @@
     previewUrl?: string;
     cacheUrl?: string;
     cacheState: MediaCacheState;
+    videoPreloadKey?: string;
+    videoPreloadUrl?: string;
+    videoPreloadState: LoadedVideoPreloadState;
+    videoPreloadBufferedSeconds?: number;
+    videoPreloadDurationSeconds?: number;
+    videoPreloadError?: string;
   };
 
   type ViewerUiMode = 'full' | 'mini' | 'hidden';
@@ -90,6 +104,9 @@
   const ROULETTE_QUERY_PARAM = 'roulette';
   const MIN_VIDEO_ADVANCE_MS = 5000;
   const VIEWER_UI_DISENGAGE_DELAY_MS = 900;
+  const VIDEO_PRELOAD_AHEAD_POSTS = 8;
+  const VIDEO_PRELOAD_BEHIND_POSTS = 1;
+  const VIDEO_PRELOAD_DEFAULT_MAX_ACTIVE = 2;
   const DISPLAY_MODES: Array<{
     id: DisplayMode;
     label: string;
@@ -154,6 +171,8 @@
   let mediaCacheByUrl = $state<Record<string, boolean>>({});
   let mediaCacheRuntime = $state<MediaCacheRuntimeState>('inactive');
   let mediaCacheProbeGeneration = 0;
+  let videoPreloadByKey = $state<Record<string, VideoPreloadUpdate>>({});
+  let videoPreloadMaxActive = $state(VIDEO_PRELOAD_DEFAULT_MAX_ACTIVE);
   let lastVideoLoopBoundaryAt = $state(0);
   let rouletteSettings = $state<SubredditRouletteSettings>(DEFAULT_ROULETTE_SETTINGS);
   let rouletteTransitioning = $state(false);
@@ -235,6 +254,94 @@
     return previewUrl && isInspectableMediaUrl(previewUrl) ? previewUrl : undefined;
   }
 
+  function getVideoPreloadPriority(index: number): number {
+    const distance = index - currentIndex;
+    return distance > 0
+      ? distance
+      : VIDEO_PRELOAD_AHEAD_POSTS + Math.abs(distance);
+  }
+
+  function getVideoPreloadTarget(
+    post: PostRecord,
+    index: number,
+    selectedItemIndex = 0
+  ): VideoPreloadTarget | undefined {
+    const media = post.media;
+    if (media?.kind !== 'video') return undefined;
+
+    const item = media.items[selectedItemIndex] ?? media.items[0];
+    if (!item?.url || !isInspectableMediaUrl(item.url)) return undefined;
+
+    return {
+      key: createVideoPreloadKey(post.id, media.id, selectedItemIndex, item.url),
+      url: item.url,
+      postId: post.id,
+      mediaId: media.id,
+      itemIndex: selectedItemIndex,
+      postIndex: index,
+      title: post.title,
+      priority: getVideoPreloadPriority(index),
+      mimeType: item.mimeType,
+    };
+  }
+
+  function isInVideoPreloadWindow(index: number): boolean {
+    const distance = index - currentIndex;
+    return distance !== 0 &&
+      distance >= -VIDEO_PRELOAD_BEHIND_POSTS &&
+      distance <= VIDEO_PRELOAD_AHEAD_POSTS;
+  }
+
+  function getCurrentVideoPreloadState(): LoadedVideoPreloadState {
+    if (currentMediaLoadState === 'error') return 'error';
+    if (currentMediaLoadState === 'ready') return 'visible';
+    return 'warming';
+  }
+
+  function getTileVideoPreloadMode(index: number): 'auto' | 'metadata' {
+    return index === currentIndex || isInVideoPreloadWindow(index) ? 'auto' : 'metadata';
+  }
+
+  function resolveLoadedMediaVideoPreloadState(
+    post: PostRecord,
+    index: number,
+    selectedItemIndex: number,
+    plannedKeys: Set<string>
+  ) {
+    const target = getVideoPreloadTarget(post, index, selectedItemIndex);
+    if (!target) {
+      return { state: 'skipped' as LoadedVideoPreloadState };
+    }
+
+    if (index === currentIndex) {
+      return {
+        key: target.key,
+        url: target.url,
+        state: getCurrentVideoPreloadState(),
+        bufferedSeconds: currentVideoTiming?.currentTime,
+        durationSeconds: currentVideoTiming?.duration,
+      };
+    }
+
+    const snapshot = videoPreloadByKey[target.key];
+    if (snapshot) {
+      return {
+        key: target.key,
+        url: target.url,
+        state: snapshot.state as LoadedVideoPreloadState,
+        bufferedSeconds: snapshot.bufferedSeconds,
+        durationSeconds: snapshot.durationSeconds,
+        error: snapshot.error,
+      };
+    }
+
+    return {
+      key: target.key,
+      url: target.url,
+      state: plannedKeys.has(target.key) ? 'queued' as LoadedVideoPreloadState : 'not-planned' as LoadedVideoPreloadState,
+    };
+  }
+
   function resolveLoadedMediaCacheState(cacheUrl: string | undefined): MediaCacheState {
     if (!cacheUrl) return 'skipped';
     if (mediaCacheRuntime === 'unsupported') return 'unsupported';
@@ -263,6 +370,64 @@
       case 'skipped':
         return 'n/a';
     }
+  }
+
+  function formatVideoSeconds(seconds: number | undefined): string {
+    if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) return '0s';
+    if (seconds < 10) return `${seconds.toFixed(1)}s`;
+    return `${Math.round(seconds)}s`;
+  }
+
+  function formatLoadedMediaVideoPreloadState(item: Pick<
+    LoadedMediaQueueItem,
+    'videoPreloadState' | 'videoPreloadBufferedSeconds' | 'videoPreloadError'
+  >) {
+    switch (item.videoPreloadState) {
+      case 'visible':
+        return 'video visible';
+      case 'buffered':
+        return `video buffered ${formatVideoSeconds(item.videoPreloadBufferedSeconds)}`;
+      case 'ready':
+        return 'video ready';
+      case 'metadata':
+        return 'video metadata';
+      case 'warming':
+        return 'video warming';
+      case 'queued':
+        return 'video queued';
+      case 'not-planned':
+        return 'video not planned';
+      case 'error':
+        return item.videoPreloadError ? `video error: ${item.videoPreloadError}` : 'video error';
+      case 'skipped':
+        return 'n/a';
+    }
+  }
+
+  function getPreferredVideoPreloadLimit(): number {
+    if (typeof navigator === 'undefined') return VIDEO_PRELOAD_DEFAULT_MAX_ACTIVE;
+
+    const connection = (navigator as Navigator & {
+      connection?: { saveData?: boolean; effectiveType?: string };
+    }).connection;
+    if (connection?.saveData) return 0;
+
+    const effectiveType = connection?.effectiveType ?? '';
+    if (effectiveType.includes('2g') || effectiveType === 'slow-2g') return 1;
+    if (effectiveType === '3g') return 1;
+
+    return VIDEO_PRELOAD_DEFAULT_MAX_ACTIVE;
+  }
+
+  function refreshVideoPreloadBudget() {
+    videoPreloadMaxActive = getPreferredVideoPreloadLimit();
+  }
+
+  function handleVideoPreloadUpdate(update: VideoPreloadUpdate) {
+    videoPreloadByKey = {
+      ...videoPreloadByKey,
+      [update.key]: update,
+    };
   }
 
   async function refreshMediaCacheRuntime() {
@@ -630,7 +795,7 @@
     await recordEvent('impression', posts[index]);
     await recordEvent('view_start', posts[index]);
 
-    if (index >= posts.length - 5) {
+    if (index >= posts.length - (VIDEO_PRELOAD_AHEAD_POSTS + 5)) {
       void loadMore();
     }
   }
@@ -924,6 +1089,16 @@
       return cacheUrl ? [cacheUrl] : [];
     })
   );
+  const videoPreloadTargets = $derived(
+    posts
+      .flatMap((post, index) => {
+        if (!isInVideoPreloadWindow(index)) return [];
+        const target = getVideoPreloadTarget(post, index, 0);
+        return target ? [target] : [];
+      })
+      .sort((a, b) => a.priority - b.priority)
+  );
+  const plannedVideoPreloadKeys = $derived(new Set(videoPreloadTargets.map((target) => target.key)));
   const loadedMediaStates = $derived<LoadedMediaQueueItem[]>(
     posts.map((post, index) => {
       const status: LoadedMediaStatus =
@@ -935,6 +1110,12 @@
       const selectedItemIndex = index === currentIndex ? galleryIndex : 0;
       const previewUrl = getLoadedMediaPreviewUrl(post.media, selectedItemIndex);
       const cacheUrl = getLoadedMediaCacheUrl(post.media, selectedItemIndex);
+      const videoPreload = resolveLoadedMediaVideoPreloadState(
+        post,
+        index,
+        selectedItemIndex,
+        plannedVideoPreloadKeys
+      );
 
       return {
         id: post.id,
@@ -947,6 +1128,12 @@
         previewUrl,
         cacheUrl,
         cacheState: resolveLoadedMediaCacheState(cacheUrl),
+        videoPreloadKey: videoPreload.key,
+        videoPreloadUrl: videoPreload.url,
+        videoPreloadState: videoPreload.state,
+        videoPreloadBufferedSeconds: videoPreload.bufferedSeconds,
+        videoPreloadDurationSeconds: videoPreload.durationSeconds,
+        videoPreloadError: videoPreload.error,
       };
     })
   );
@@ -965,6 +1152,23 @@
         ? 'cache unsupported'
         : 'cache inactive'
   );
+  const videoLoadedMediaCount = $derived(
+    loadedMediaStates.filter((item) => item.videoPreloadState !== 'skipped').length
+  );
+  const warmVideoLoadedMediaCount = $derived(
+    loadedMediaStates.filter((item) =>
+      item.videoPreloadState === 'visible' ||
+      item.videoPreloadState === 'ready' ||
+      item.videoPreloadState === 'buffered'
+    ).length
+  );
+  const activeVideoPreloadCount = $derived(Math.min(videoPreloadTargets.length, videoPreloadMaxActive));
+  const videoPreloadSummary = $derived(
+    videoLoadedMediaCount > 0
+      ? `${warmVideoLoadedMediaCount}/${videoLoadedMediaCount} video warm`
+      : 'no videos'
+  );
+  const mediaReadinessSummary = $derived(`${loadedMediaCacheSummary} · ${videoPreloadSummary}`);
   const displayTiles = $derived(
     posts
       .map((post, index) => {
@@ -1097,6 +1301,21 @@
     }
 
     void probeLoadedMediaCache(cacheUrls);
+  });
+
+  $effect(() => {
+    const retainedKeys = new Set(plannedVideoPreloadKeys);
+    const currentVideoTarget = currentPost
+      ? getVideoPreloadTarget(currentPost, currentIndex, galleryIndex)
+      : undefined;
+    if (currentVideoTarget) retainedKeys.add(currentVideoTarget.key);
+
+    const entries = Object.entries(videoPreloadByKey)
+      .filter(([key]) => retainedKeys.has(key));
+
+    if (entries.length !== Object.keys(videoPreloadByKey).length) {
+      videoPreloadByKey = Object.fromEntries(entries);
+    }
   });
 
   $effect(() => {
@@ -1382,7 +1601,7 @@
       await recordEvent('impression', posts[currentIndex]);
       await recordEvent('view_start', posts[currentIndex]);
 
-      if (currentIndex >= posts.length - 5) {
+      if (currentIndex >= posts.length - (VIDEO_PRELOAD_AHEAD_POSTS + 5)) {
         void loadMore();
       }
     } else if (isRouletteMode) {
@@ -1677,6 +1896,12 @@
     rouletteSettings = readStoredRouletteSettings();
 
     void refreshMediaCacheRuntime();
+    refreshVideoPreloadBudget();
+
+    const connection = (navigator as Navigator & {
+      connection?: EventTarget;
+    }).connection;
+    connection?.addEventListener('change', refreshVideoPreloadBudget);
 
     const unsubscribeFromMediaCache = subscribeToMediaCacheUpdates((url) => {
       mediaCacheByUrl = {
@@ -1702,6 +1927,7 @@
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.removeEventListener('controllerchange', handleServiceWorkerControllerChange);
       }
+      connection?.removeEventListener('change', refreshVideoPreloadBudget);
       window.removeEventListener('keydown', handleKeydown);
       cancelAnimationFrame(scrollSyncFrame);
       cancelAnimationFrame(masonrySyncFrame);
@@ -1726,6 +1952,12 @@
   role="region"
   aria-label="Media viewer"
 >
+  <VideoPreloadPool
+    targets={videoPreloadTargets}
+    maxActive={videoPreloadMaxActive}
+    onupdate={handleVideoPreloadUpdate}
+  />
+
   <div class="viewer-canvas">
     {#if loading}
       <div class="viewer-state loading">Loading feed…</div>
@@ -1822,11 +2054,11 @@
                   {#if tile.isVideo}
                     <video
                       src={tile.item.url}
-                      muted
-                      autoplay={tile.isActive}
-                      loop
-                      playsinline
-                      preload="metadata"
+	                      muted
+	                      autoplay={tile.isActive}
+	                      loop
+	                      playsinline
+	                      preload={getTileVideoPreloadMode(tile.index)}
                       class="tile-video"
                       onloadedmetadata={(event) => captureActiveTileVideoTiming(tile.index, event)}
                       ontimeupdate={(event) => captureActiveTileVideoTiming(tile.index, event)}
@@ -1944,11 +2176,11 @@
                   {#if tile.isVideo}
                     <video
                       src={tile.item.url}
-                      muted
-                      autoplay={tile.isActive}
-                      loop
-                      playsinline
-                      preload="metadata"
+	                      muted
+	                      autoplay={tile.isActive}
+	                      loop
+	                      playsinline
+	                      preload={getTileVideoPreloadMode(tile.index)}
                       class="tile-video"
                       onloadedmetadata={(event) => captureActiveTileVideoTiming(tile.index, event)}
                       ontimeupdate={(event) => captureActiveTileVideoTiming(tile.index, event)}
@@ -2040,11 +2272,11 @@
                 {#if currentMedia.kind === 'video'}
                   <video
                     src={currentItem.url}
-                    muted
-                    autoplay
-                    loop
-                    playsinline
-                    preload="metadata"
+	                    muted
+	                    autoplay
+	                    loop
+	                    playsinline
+	                    preload="auto"
                     class="wild-backdrop-media"
                   ></video>
                 {:else}
@@ -2069,11 +2301,11 @@
                   {#if tile.isVideo}
                     <video
                       src={tile.item.url}
-                      muted
-                      autoplay={tile.offset === 0}
-                      loop
-                      playsinline
-                      preload="metadata"
+	                      muted
+	                      autoplay={tile.offset === 0}
+	                      loop
+	                      playsinline
+	                      preload={getTileVideoPreloadMode(tile.index)}
                       class="wild-card-media"
                       onloadedmetadata={(event) => captureActiveTileVideoTiming(tile.index, event)}
                       ontimeupdate={(event) => captureActiveTileVideoTiming(tile.index, event)}
@@ -2135,20 +2367,8 @@
 	    onfocusout={handleViewerSurfaceFocusOut}
 	  >
 	    <div class="topbar-nav">
-	      <a href="/r/all" class="logo">SubGlass</a>
-	      <span class="route-chip" title={pathInput}>{pathInput || '/r/all'}</span>
-	      <span class="mode-chip" title={currentDisplayMode.blurb}>{currentDisplayMode.label}</span>
-	      <span class="ui-mode-chip">{viewerUiMode}</span>
-	      {#if isRouletteMode}
-	        <span class="roulette-chip">roulette {rouletteRoundProgress}/{rouletteSettings.imagesPerRound}</span>
-	      {/if}
-	      <ProfileScanStatus class="viewer-profile-scan-status" />
-	      {#if routeNotice && (!routeNoticeRouteKey || routeNoticeRouteKey === activeRouteKey)}
-	        <span class="route-notice-chip" title={routeNotice}>{routeNotice}</span>
-	      {/if}
-
-	      <details class="topbar-menu">
-	        <summary aria-label="Viewer menu">menu</summary>
+	      <details class="topbar-menu topbar-brand-menu">
+	        <summary class="logo" aria-label="Viewer menu">SubGlass</summary>
 	        <div class="topbar-menu-panel">
 	          <form onsubmit={(event) => { event.preventDefault(); navigate(); }} class="path-form">
 	            <input
@@ -2334,6 +2554,14 @@
 	          </div>
 	        </div>
 	      </details>
+	      <span class="route-chip" title={pathInput}>{pathInput || '/r/all'}</span>
+	      {#if isRouletteMode}
+	        <span class="roulette-chip">roulette {rouletteRoundProgress}/{rouletteSettings.imagesPerRound}</span>
+	      {/if}
+	      <ProfileScanStatus class="viewer-profile-scan-status" />
+	      {#if routeNotice && (!routeNoticeRouteKey || routeNoticeRouteKey === activeRouteKey)}
+	        <span class="route-notice-chip" title={routeNotice}>{routeNotice}</span>
+	      {/if}
 	    </div>
 
 	    {#if currentPost && currentMedia && !loading && !error}
@@ -2355,7 +2583,7 @@
 	        <span class="status-subreddit">r/{currentPost.subreddit}</span>
 
 	        <details class="status-menu">
-	          <summary aria-label={`Loaded queue showing ${loadedMediaStates.length} items, ${loadedMediaCacheSummary}`}>
+	          <summary aria-label={`Loaded queue showing ${loadedMediaStates.length} items, ${mediaReadinessSummary}`}>
 	            <span class="status-label">queue</span>
 	            <span class="load-rail" aria-hidden="true">
 	              {#each loadedMediaStates as item (item.id)}
@@ -2367,7 +2595,8 @@
 	                  data-kind={item.kind}
 	                  data-status={item.status}
 	                  data-cache={item.cacheState}
-	                  title={`#${item.index + 1} · ${formatLoadedMediaKind(item.kind)} · ${item.status} · ${item.title}`}
+	                  data-video-preload={item.videoPreloadState}
+	                  title={`#${item.index + 1} · ${formatLoadedMediaKind(item.kind)} · ${item.status} · ${formatLoadedMediaCacheState(item.cacheState)} · ${formatLoadedMediaVideoPreloadState(item)} · ${item.title}`}
 	                ></span>
 	              {/each}
 	            </span>
@@ -2376,7 +2605,7 @@
 	            <div class="status-panel-section">
 	              <div class="status-panel-heading">
 	                <span>queue</span>
-	                <span>{loadedMediaCacheSummary}</span>
+	                <span>{mediaReadinessSummary}</span>
 	              </div>
 	              <div class="status-queue-list" role="list" aria-label="Loaded media queue">
 	                {#each loadedMediaStates as item (item.id)}
@@ -2386,6 +2615,7 @@
 	                    data-current={item.index === currentIndex}
 	                    data-status={item.status}
 	                    data-cache={item.cacheState}
+	                    data-video-preload={item.videoPreloadState}
 	                    aria-current={item.index === currentIndex ? 'true' : undefined}
 	                    title={`Jump to ${item.title}`}
 	                    onclick={() => selectPost(item.index)}
@@ -2399,11 +2629,18 @@
 	                      data-kind={item.kind}
 	                      data-status={item.status}
 	                      data-cache={item.cacheState}
+	                      data-video-preload={item.videoPreloadState}
 	                    ></span>
 	                    <span class="queue-item-copy">
 	                      <span class="queue-item-title">{item.title}</span>
 	                      <span class="queue-item-meta">
-	                        {formatLoadedMediaKind(item.kind)} · {item.status} · {formatLoadedMediaCacheState(item.cacheState)}
+	                        {formatLoadedMediaKind(item.kind)} · {item.status}
+	                        {#if item.cacheState !== 'skipped'}
+	                          · image {formatLoadedMediaCacheState(item.cacheState)}
+	                        {/if}
+	                        {#if item.videoPreloadState !== 'skipped'}
+	                          · {formatLoadedMediaVideoPreloadState(item)}
+	                        {/if}
 	                      </span>
 	                    </span>
 	                  </button>
@@ -2412,6 +2649,20 @@
 	            </div>
 
 	            <div class="status-panel-section status-panel-section--auto">
+	              <div class="status-panel-heading">
+	                <span>media cache</span>
+	                <span>{mediaReadinessSummary}</span>
+	              </div>
+	              <div class="cache-readiness-grid">
+	                <span>images</span>
+	                <strong>{loadedMediaCacheSummary}</strong>
+	                <span>videos</span>
+	                <strong>{videoPreloadSummary}</strong>
+	                <span>preloads</span>
+	                <strong>{activeVideoPreloadCount}/{videoPreloadTargets.length} active</strong>
+	                <span>window</span>
+	                <strong>{VIDEO_PRELOAD_BEHIND_POSTS} back / {VIDEO_PRELOAD_AHEAD_POSTS} ahead</strong>
+	              </div>
 	              <div class="status-panel-heading">
 	                <span>auto-next</span>
 	                <span>{autoAdvanceSummary}</span>
@@ -2446,20 +2697,22 @@
 
 	        <button
 	          type="button"
-	          class="auto-dock-toggle"
+	          class="auto-dock-toggle auto-countdown-button"
 	          onclick={toggleAutoAdvance}
 	          title={`${autoAdvanceSummary} · Pause or resume auto-next (${getViewerShortcut('toggle_auto_forward').displayKeys.join(' / ')})`}
 	          aria-label={`${autoAdvanceSummary}. Pause or resume auto-next.`}
 	        >
-	          {#if autoAdvanceSuspended}
-	            paused
-	          {:else if currentMedia.kind === 'video' && !currentVideoTiming?.duration}
-	            wait
-	          {:else}
-	            {formatCountdownReadout(autoAdvanceRemainingMs)}
-	          {/if}
+	          <span class="auto-countdown-readout">
+	            {#if autoAdvanceSuspended}
+	              paused
+	            {:else if currentMedia.kind === 'video' && !currentVideoTiming?.duration}
+	              wait
+	            {:else}
+	              {formatCountdownReadout(autoAdvanceRemainingMs)}
+	            {/if}
+	          </span>
+	          <span class="auto-advance-title">{autoAdvanceSummary}</span>
 	        </button>
-	        <span class="auto-advance-title">{autoAdvanceSummary}</span>
 	      </div>
 	    {/if}
 	  </nav>
@@ -2712,8 +2965,6 @@
   }
 
   .route-chip,
-  .mode-chip,
-  .ui-mode-chip,
   .roulette-chip,
   .route-notice-chip,
   .topbar-menu summary,
@@ -2737,16 +2988,6 @@
     padding: 0 9px;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .mode-chip {
-    padding: 0 9px;
-    color: rgba(165, 210, 240, 0.92);
-  }
-
-  .ui-mode-chip {
-    padding: 0 8px;
-    color: rgba(195, 206, 216, 0.78);
   }
 
   .roulette-chip {
@@ -3870,10 +4111,6 @@
     max-width: min(168px, 34vw);
   }
 
-  .viewer-page[data-ui-mode='mini'] .ui-mode-chip {
-    display: none;
-  }
-
   .viewer-page[data-ui-mode='mini'] .selection-card {
     width: min(300px, calc(100vw - 20px));
     gap: 4px;
@@ -4129,7 +4366,6 @@
       max-width: 112px;
     }
 
-    .viewer-page[data-ui-mode='mini'] .mode-chip,
     .viewer-page[data-ui-mode='mini'] .topbar-menu summary {
       padding-inline: 8px;
     }
@@ -4200,8 +4436,7 @@
   .status-subreddit,
   .status-menu summary,
   .status-label,
-  .auto-dock-toggle,
-  .auto-advance-title {
+  .auto-dock-toggle {
     display: inline-flex;
     min-height: 28px;
     align-items: center;
@@ -4216,13 +4451,12 @@
 
   .status-count,
   .status-subreddit,
-  .status-label,
-  .auto-advance-title {
+  .status-label {
     padding: 0 8px;
   }
 
   .status-count,
-  .auto-dock-toggle {
+  .auto-countdown-readout {
     font-variant-numeric: tabular-nums;
   }
 
@@ -4283,6 +4517,11 @@
     border-radius: 4px;
   }
 
+  .load-chip[data-kind='video'] {
+    width: 14px;
+    border-radius: 5px;
+  }
+
   .load-chip.current {
     transform: translateY(-1px);
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
@@ -4322,6 +4561,30 @@
   .load-chip[data-cache='unsupported'],
   .load-chip[data-cache='skipped'] {
     opacity: 0.52;
+  }
+
+  .load-chip[data-kind='video']::before {
+    content: '';
+    position: absolute;
+    inset: 2px 2px auto;
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.26);
+  }
+
+  .load-chip[data-video-preload='warming']::before,
+  .load-chip[data-video-preload='metadata']::before {
+    background: rgba(232, 189, 95, 0.86);
+  }
+
+  .load-chip[data-video-preload='ready']::before,
+  .load-chip[data-video-preload='buffered']::before,
+  .load-chip[data-video-preload='visible']::before {
+    background: rgba(113, 212, 136, 0.92);
+  }
+
+  .load-chip[data-video-preload='error']::before {
+    background: rgba(222, 126, 126, 0.92);
   }
 
   .load-chip::after {
@@ -4373,6 +4636,14 @@
     text-transform: uppercase;
   }
 
+  .status-panel-heading > :last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .status-queue-list {
     display: grid;
     gap: 5px;
@@ -4401,6 +4672,17 @@
   .status-queue-item[data-current='true'] {
     background: rgba(106, 176, 222, 0.13);
     border-color: rgba(106, 176, 222, 0.28);
+  }
+
+  .status-queue-item[data-video-preload='warming'],
+  .status-queue-item[data-video-preload='metadata'] {
+    border-color: rgba(232, 189, 95, 0.18);
+  }
+
+  .status-queue-item[data-video-preload='ready'],
+  .status-queue-item[data-video-preload='buffered'],
+  .status-queue-item[data-video-preload='visible'] {
+    border-color: rgba(113, 212, 136, 0.22);
   }
 
   .queue-item-index {
@@ -4443,16 +4725,65 @@
     box-shadow: none;
   }
 
+  .cache-readiness-grid {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px 10px;
+    padding: 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: #9fb0be;
+    font-size: 0.68rem;
+  }
+
+  .cache-readiness-grid strong {
+    min-width: 0;
+    overflow: hidden;
+    color: #edf5fc;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .auto-dock-toggle {
-    min-width: 48px;
+    min-width: 54px;
     justify-content: center;
     padding: 0 8px;
   }
 
-  .auto-advance-title {
+  .auto-countdown-button {
+    gap: 8px;
+    max-width: min(260px, 24vw);
+    cursor: pointer;
+  }
+
+  .auto-countdown-readout {
+    min-width: 42px;
+    text-align: center;
+  }
+
+  .auto-countdown-button .auto-advance-title {
+    display: inline-block;
+    min-width: 0;
     max-width: 160px;
     overflow: hidden;
+    color: rgba(237, 246, 255, 0.82);
+    font-size: 0.72rem;
     text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .auto-countdown-button:hover,
+  .auto-countdown-button:focus-visible {
+    background: rgba(140, 199, 239, 0.14);
+    border-color: rgba(140, 199, 239, 0.24);
+    color: #edf6ff;
+  }
+
+  .auto-countdown-button:hover .auto-advance-title,
+  .auto-countdown-button:focus-visible .auto-advance-title {
+    color: #edf6ff;
   }
 
   .ui-reveal-button {
@@ -4551,7 +4882,6 @@
       max-width: 128px;
     }
 
-    .ui-mode-chip,
     .status-subreddit,
     .status-label,
     .auto-advance-title {
