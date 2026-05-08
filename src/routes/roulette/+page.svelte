@@ -35,6 +35,7 @@
   );
   const selectedBundle = $derived(formatRouletteBundle(selected));
   const selectedRoutePath = $derived(selectedBundle ? formatRouletteRoutePath(selectedBundle, settings) : '');
+  const selectedRouteSummary = $derived(formatRouletteSelectionSummary(selected, settings));
   const sortUsesTime = $derived(isTimedRouletteListingSort(settings.listingSort));
 
   onMount(async () => {
@@ -102,6 +103,32 @@
 
   function formatWeight(sub: SubredditRecord) {
     return getRouletteCandidateWeight(sub, settings).toFixed(1);
+  }
+
+  function formatNsfwMode(mode: SubredditRouletteSettings['nsfwMode']) {
+    if (mode === 'only') return 'nsfw only';
+    if (mode === 'no') return 'sfw only';
+    return 'sfw + nsfw';
+  }
+
+  function formatRouletteSelectionSummary(
+    selectedSubreddits: SubredditRecord[],
+    currentSettings: SubredditRouletteSettings
+  ) {
+    const target =
+      selectedSubreddits.length === 1
+        ? `r/${selectedSubreddits[0].name}`
+        : `${selectedSubreddits.length} subreddits`;
+    const sortSummary = isTimedRouletteListingSort(currentSettings.listingSort)
+      ? `${currentSettings.listingSort}/${currentSettings.listingTime}`
+      : currentSettings.listingSort;
+
+    return [
+      target,
+      sortSummary,
+      `${currentSettings.imagesPerRound} images`,
+      formatNsfwMode(currentSettings.nsfwMode),
+    ].join(' · ');
   }
 </script>
 
@@ -241,7 +268,7 @@
           <span>{settings.listingSort}{sortUsesTime ? `/${settings.listingTime}` : ''} · {selected.length}/{settings.subredditCount} subs · {settings.imagesPerRound} images</span>
         </div>
         {#if selected.length > 0}
-          <div class="bundle-path">{selectedRoutePath}</div>
+          <div class="round-summary" title={selectedRoutePath}>{selectedRouteSummary}</div>
           <div class="selected-list">
             {#each selected as sub}
               <a href="/r/{sub.name}" class="selected-sub">
@@ -381,7 +408,7 @@
     background: #0f1417;
     border-radius: 8px;
   }
-  .bundle-path {
+  .round-summary {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -390,7 +417,6 @@
     border: 1px solid #253445;
     border-radius: 6px;
     padding: 8px 10px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 0.82rem;
   }
   .selected-list,

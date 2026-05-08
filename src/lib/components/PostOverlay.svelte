@@ -549,6 +549,7 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
+    user-select: none;
   }
 
   .top-bar,
@@ -591,6 +592,7 @@
     align-items: start;
     gap: 5px;
     transform: translateY(-4px);
+    user-select: text;
   }
 
   .action-dock {

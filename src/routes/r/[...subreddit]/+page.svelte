@@ -96,6 +96,8 @@
   };
 
   type ViewerUiMode = 'full' | 'mini' | 'hidden';
+  type RouteListingSort = (typeof ROULETTE_LISTING_SORTS)[number];
+  type RouteListingTime = (typeof ROULETTE_LISTING_TIMES)[number];
 
   const DISPLAY_MODE_STORAGE_KEY = 'subglass:display-mode';
   const AUTO_ADVANCE_SETTINGS_STORAGE_KEY = 'subglass:auto-advance-settings';
@@ -861,6 +863,56 @@
       .filter(Boolean) ?? [];
   }
 
+  function getRouteListingSort(sub: string): RouteListingSort {
+    const routeSort = sub
+      .split('/')
+      .slice(1)
+      .find((part) => part.trim().length > 0)
+      ?.trim()
+      .toLowerCase();
+
+    return ROULETTE_LISTING_SORTS.includes(routeSort as RouteListingSort)
+      ? routeSort as RouteListingSort
+      : 'hot';
+  }
+
+  function getRouteListingTime(time: string | undefined): RouteListingTime | undefined {
+    return ROULETTE_LISTING_TIMES.includes(time as RouteListingTime)
+      ? time as RouteListingTime
+      : undefined;
+  }
+
+  function formatRouteTargetSummary(sub: string) {
+    const routeSubs = extractSubreddits(sub).filter((name) => name !== 'all');
+    if (routeSubs.length === 0) return 'r/all';
+    if (routeSubs.length === 1) return `r/${routeSubs[0]}`;
+    return `${routeSubs.length} subs`;
+  }
+
+  function formatRouteListingSummary(sub: string, time: string | undefined) {
+    const sort = getRouteListingSort(sub);
+    const listingTime = getRouteListingTime(time);
+    return isTimedRouletteListingSort(sort) && listingTime ? `${sort}/${listingTime}` : sort;
+  }
+
+  function formatRouteSummary(
+    sub: string,
+    time: string | undefined,
+    roulette: boolean,
+    imagesPerRound: number
+  ) {
+    const parts = [
+      formatRouteTargetSummary(sub),
+      formatRouteListingSummary(sub, time),
+    ];
+
+    if (roulette) {
+      parts.push('roulette', `${imagesPerRound} images`);
+    }
+
+    return parts.join(' · ');
+  }
+
   function getFeedRouteKey(sub: string, time: string | undefined, roulette: boolean) {
     return `${roulette ? 'roulette' : 'feed'}:/r/${sub}?t=${time ?? ''}`;
   }
@@ -1072,6 +1124,12 @@
     DISPLAY_MODES.find((mode) => mode.id === displayMode) ?? DISPLAY_MODES[0]
   );
   const activeSubredditBundle = $derived(extractSubreddits(subredditParam).filter((name) => name !== 'all'));
+  const routeSummary = $derived(
+    formatRouteSummary(subredditParam, listingTime, isRouletteMode, rouletteSettings.imagesPerRound)
+  );
+  const routeSummaryTitle = $derived(
+    `${routeSummary}${pathInput ? ` · ${pathInput}` : ''}`
+  );
   const rouletteRoundProgress = $derived(
     Math.min(currentIndex + 1, rouletteSettings.imagesPerRound)
   );
@@ -2554,7 +2612,9 @@
 	          </div>
 	        </div>
 	      </details>
-	      <span class="route-chip" title={pathInput}>{pathInput || '/r/all'}</span>
+	      <span class="route-chip" title={routeSummaryTitle} aria-label={`Current route: ${routeSummary}`}>
+	        {routeSummary}
+	      </span>
 	      {#if isRouletteMode}
 	        <span class="roulette-chip">roulette {rouletteRoundProgress}/{rouletteSettings.imagesPerRound}</span>
 	      {/if}
@@ -2784,6 +2844,29 @@
       linear-gradient(180deg, #07090d 0%, #050608 50%, #030305 100%);
     overflow: hidden;
     isolation: isolate;
+    user-select: none;
+  }
+
+  .viewer-page input,
+  .viewer-page code,
+  .viewer-page pre,
+  .viewer-page .error,
+  .viewer-page .debug-body,
+  .viewer-page .selection-card {
+    user-select: text;
+  }
+
+  .viewer-page button,
+  .viewer-page summary,
+  .viewer-page .topbar,
+  .viewer-page .selection-actions,
+  .viewer-page .status-menu-panel {
+    user-select: none;
+  }
+
+  .viewer-page .topbar input,
+  .viewer-page .status-menu-panel input {
+    user-select: text;
   }
 
   .viewer-canvas,
