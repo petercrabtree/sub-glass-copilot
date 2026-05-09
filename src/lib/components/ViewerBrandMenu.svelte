@@ -5,7 +5,7 @@
       <span class="viewer-menu-label">places</span>
       <div class="nav-links">
         <a href="/r/all">viewer</a>
-        <a href="/feed/random">feed</a>
+        <a href="/feed">feed</a>
         <a href="/roulette">roulette</a>
         <a href="/discover">discover</a>
         <a href="/admin">admin</a>
