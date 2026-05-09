@@ -2,7 +2,7 @@
 
 - On each meaningful repo change, briefly consider whether `AGENTS.md` should also be updated. Only edit it when the change adds durable, high-signal guidance that will help future agents.
 - Prefer Conventional Commit style messages for commits made in this repo, using a lowercase type prefix like `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, or `chore:` when it fits.
-- After completing an implementation, commit the completed work by default. Follow-up changes that belong in that same unpublished unit of work should be folded in with `git commit --amend`; do not amend after the commit has been pushed.
+- After completing an implementation, commit the completed work by default. Make follow-up changes as new commits; only use `git commit --amend` when the user explicitly asks for an amend, and never amend after a commit has been pushed.
 - Do not add local, Vite, same-origin, or server-side proxy workarounds for Reddit/API access unless the user explicitly asks for a proxy-based solution.
 - This is a personal project, so diagnostics and error reporting can be developer-facing and optimized for debugging rather than end-user polish.
 - This app is a client-only SvelteKit SPA. `src/routes/+layout.ts` sets `ssr = false` and `prerender = false`, and `svelte.config.js` uses `@sveltejs/adapter-static` with a `200.html` fallback. Prefer browser-side solutions; do not introduce server-only assumptions unless explicitly requested.

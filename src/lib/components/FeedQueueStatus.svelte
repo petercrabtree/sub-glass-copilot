@@ -1,15 +1,10 @@
 <script lang="ts">
   import { Database, Lock, RefreshCw, RotateCcw, Unlock } from 'lucide-svelte';
-  import type { FeedRunItem, MediaKind } from '$lib/types';
+  import LoadedMediaRail from '$lib/components/LoadedMediaRail.svelte';
+  import type { LoadedMediaChipItem } from '$lib/components/LoadedMediaChip.svelte';
+  import type { FeedRunItem } from '$lib/types';
 
-  type LoadedMediaStatus = 'queued' | 'seen' | 'loading' | 'ready' | 'error';
-  type LoadedMediaQueueItem = {
-    id: string;
-    index: number;
-    kind: MediaKind | 'unknown';
-    title: string;
-    rating?: 1 | -1;
-    status: LoadedMediaStatus;
+  type LoadedMediaQueueItem = LoadedMediaChipItem & {
     sourceLabel?: string;
     slot?: string;
   };
@@ -60,6 +55,10 @@
   const sourceCount = $derived(new Set(items.map((item) => item.sourceKey).filter(Boolean)).size);
   const activityLabel = $derived(refilling ? 'refilling' : refreshingTail ? 'refreshing' : 'ready');
   const positionLabel = $derived(postsLength > 0 ? `${currentIndex + 1} / ${postsLength}` : feedStatus);
+
+  function formatRailTitle(item: LoadedMediaQueueItem): string {
+    return `#${item.index + 1} - ${item.slot ?? 'tail'} - ${item.sourceLabel ?? 'local'} - ${item.title}`;
+  }
 </script>
 
 <div class="feed-queue-status" role="group" aria-label="Feed queue controls" data-locked={locked}>
@@ -79,19 +78,11 @@
   <details class="viewer-top-menu status-menu">
     <summary aria-label={`Feed queue: ${queueHealth}`}>
       <span class="status-label">queue</span>
-      <span class="load-rail" aria-hidden="true">
-        {#each visibleLoadedMedia as item (item.id)}
-          <span
-            class="load-chip"
-            class:rating-up={item.rating === 1}
-            class:rating-down={item.rating === -1}
-            class:current={item.index === currentIndex}
-            data-kind={item.kind}
-            data-status={item.status}
-            title={`#${item.index + 1} - ${item.slot ?? 'tail'} - ${item.sourceLabel ?? 'local'} - ${item.title}`}
-          ></span>
-        {/each}
-      </span>
+      <LoadedMediaRail
+        items={visibleLoadedMedia}
+        {currentIndex}
+        titleForItem={formatRailTitle}
+      />
     </summary>
     <div class="status-menu-panel">
       <section class="status-panel-section">
@@ -189,73 +180,6 @@
     width: 100%;
     min-width: 0;
     padding: 0 8px;
-  }
-
-  .load-rail {
-    display: inline-flex;
-    align-items: center;
-    flex: 1 1 auto;
-    gap: 4px;
-    min-width: 34px;
-    overflow: hidden;
-  }
-
-  .load-chip {
-    position: relative;
-    display: inline-flex;
-    flex: 0 0 auto;
-    width: 8px;
-    height: 16px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.18);
-    overflow: hidden;
-  }
-
-  .load-chip[data-kind='gallery'] {
-    width: 12px;
-    border-radius: 4px;
-  }
-
-  .load-chip[data-kind='video'] {
-    width: 14px;
-    border-radius: 5px;
-  }
-
-  .load-chip.current {
-    transform: translateY(-1px);
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
-  }
-
-  .load-chip[data-status='seen'] {
-    background: rgba(255, 255, 255, 0.34);
-  }
-
-  .load-chip[data-status='loading'] {
-    background: rgba(214, 176, 103, 0.68);
-  }
-
-  .load-chip[data-status='ready'] {
-    background: rgba(106, 176, 222, 0.82);
-  }
-
-  .load-chip[data-status='error'] {
-    background: rgba(190, 101, 101, 0.82);
-  }
-
-  .load-chip::after {
-    content: '';
-    position: absolute;
-    inset: auto 0 0;
-    height: 3px;
-    background: transparent;
-  }
-
-  .load-chip.rating-up::after {
-    background: #71d488;
-  }
-
-  .load-chip.rating-down::after {
-    background: #de7e7e;
   }
 
   .status-menu-panel {
