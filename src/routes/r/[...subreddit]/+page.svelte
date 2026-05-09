@@ -6,6 +6,7 @@
   import { ExternalLink, Image as ImageIcon, Plus, ThumbsDown, ThumbsUp, X } from 'lucide-svelte';
   import type {
     FeedSnapshot,
+    FetchSpec,
     MediaGroup,
     MediaItem,
     MediaKind,
@@ -18,6 +19,7 @@
   import { fetchListing, readRedditDebugState } from '$lib/transport/reddit';
   import type { RedditDebugState, RedditRequestError } from '$lib/transport/reddit';
   import { normalizeListingMediaPosts, persistFetchedPosts } from '$lib/feed/ingest';
+  import { readCachedListingPosts, writeListingCache } from '$lib/feed/listing-cache';
   import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import {
     DEFAULT_ROULETTE_SETTINGS,
@@ -1374,6 +1376,16 @@
     });
   }
 
+  function createListingFetchSpec(sub: string, time: string | undefined, after?: string | null): FetchSpec {
+    return {
+      path: `/r/${sub}`,
+      subreddits: extractSubreddits(sub),
+      sort: getRouteListingSort(sub),
+      time,
+      after: after ?? undefined,
+    };
+  }
+
   function getProfileScanTargets(sub: string, mediaPosts: PostRecord[]) {
     const routeSubs = extractSubreddits(sub).filter((name) => name !== 'all');
     if (routeSubs.length > 0 && routeSubs.length <= 12) return routeSubs;
@@ -1842,7 +1854,34 @@
     }
     seenIds = await getSeenPostIds();
 
-    const spec = { path: `/r/${sub}`, subreddits: extractSubreddits(sub), time };
+    const restoredAfterCursor = afterCursor;
+    const spec = createListingFetchSpec(sub, time);
+    const cached = await readCachedListingPosts(spec, 25);
+    if (routeKey !== activeRouteKey || routeKey !== lastRouteLoadKey) return;
+
+    if (cached) {
+      afterCursor = restored ? (restoredAfterCursor ?? cached.after) : cached.after;
+
+      const { mergedPosts, nextIndex } = mergePostsPreservingCurrent(cached.posts, restored);
+      posts = mergedPosts;
+      currentIndex = nextIndex;
+      loading = false;
+      syncCurrentSelectionState();
+      scheduleFeedSnapshotSave();
+
+      const scanTargets = getProfileScanTargets(sub, cached.posts);
+      if (scanTargets.length > 0) {
+        void profileScanManager.enqueueBackgroundTargets(scanTargets).catch((scanError) => {
+          console.warn('Failed to scan subreddit profiles', scanError);
+        });
+      }
+
+      if (posts.length > 0) {
+        void refreshCurrentPostContext(posts[currentIndex]);
+      }
+      return;
+    }
+
     const result = await fetchListing(spec, 25);
     if (routeKey !== activeRouteKey || routeKey !== lastRouteLoadKey) return;
     syncRedditDebug();
@@ -1859,10 +1898,12 @@
       return;
     }
 
-    afterCursor = result.data.data.after || null;
+    const resultAfterCursor = result.data.data.after || null;
+    afterCursor = restored ? (restoredAfterCursor ?? resultAfterCursor) : resultAfterCursor;
     const mediaPosts = await normalizeListingMediaPosts(result.data);
 
     await persistLoadedPosts(mediaPosts, getFeedPath(sub, time, roulette), sub, time, roulette);
+    await writeListingCache(spec, mediaPosts, resultAfterCursor, 25);
 
     const { mergedPosts, nextIndex } = mergePostsPreservingCurrent(mediaPosts, restored);
     posts = mergedPosts;
@@ -1889,12 +1930,22 @@
     lastLoadMoreTrigger = trigger;
     loadingMore = true;
 
-    const spec = {
-      path: `/r/${subredditParam}`,
-      subreddits: extractSubreddits(subredditParam),
-      after: afterCursor,
-      time: listingTime,
-    };
+    const spec = createListingFetchSpec(subredditParam, listingTime, afterCursor);
+    const cached = await readCachedListingPosts(spec, 25);
+    if (routeKey !== activeRouteKey) {
+      loadingMore = false;
+      return;
+    }
+
+    if (cached) {
+      afterCursor = cached.after;
+      const existingIds = new Set(posts.map((post) => post.id));
+      posts = [...posts, ...cached.posts.filter((post) => !existingIds.has(post.id))];
+      scheduleFeedSnapshotSave();
+      loadingMore = false;
+      return;
+    }
+
     const result = await fetchListing(spec, 25);
     if (routeKey !== activeRouteKey) {
       loadingMore = false;
@@ -1903,7 +1954,8 @@
     syncRedditDebug();
 
     if (result.ok) {
-      afterCursor = result.data.data.after || null;
+      const resultAfterCursor = result.data.data.after || null;
+      afterCursor = resultAfterCursor;
       const mediaPosts = await normalizeListingMediaPosts(result.data);
 
       await persistLoadedPosts(
@@ -1913,6 +1965,7 @@
         listingTime,
         isRouletteMode
       );
+      await writeListingCache(spec, mediaPosts, resultAfterCursor, 25);
 
       const existingIds = new Set(posts.map((post) => post.id));
       posts = [...posts, ...mediaPosts.filter((post) => !existingIds.has(post.id))];
