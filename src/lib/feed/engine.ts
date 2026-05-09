@@ -15,6 +15,7 @@ import {
 import { fetchListing } from '$lib/transport/reddit';
 import { ensureFeedRecipe, type FeedRecipeInput } from '$lib/feed/recipes';
 import { persistListingResponse, markSourceFetchFailed } from '$lib/feed/ingest';
+import { readCachedListingPosts, writeListingCache } from '$lib/feed/listing-cache';
 import { mixFeedQueue } from '$lib/feed/mixer';
 import { planFeedSourceFetches } from '$lib/feed/source-planner';
 import {
@@ -25,7 +26,7 @@ import {
   getFeedSourceRoutePath,
 } from '$lib/feed/source';
 import { scoreFeedCandidates } from '$lib/feed/scoring';
-import type { FeedRecipe, FeedRun, FeedRunItem, PostRecord, SourceStats } from '$lib/types';
+import type { FeedRecipe, FeedRun, FeedRunItem, FetchSpec, PostRecord, SourceStats } from '$lib/types';
 
 export interface FeedRunState {
   recipe: FeedRecipe;
@@ -39,12 +40,19 @@ export interface BuildFeedRunOptions {
   currentIndex?: number;
 }
 
+export interface RefillFeedSourcesOptions {
+  force?: boolean;
+  forceNetwork?: boolean;
+}
+
 export interface FeedRefillResult {
   attempted: number;
   ok: number;
   failed: number;
   mediaPosts: number;
   newPosts: number;
+  cacheHits: number;
+  networkRequests: number;
   sources: string[];
   scanTargets: string[];
 }
@@ -173,7 +181,10 @@ function getSourceStatsMap(stats: SourceStats[]): Map<string, SourceStats> {
   return new Map(stats.map((entry) => [entry.sourceKey, entry]));
 }
 
-export async function refillFeedSources(feedInput: string | FeedRecipeInput): Promise<FeedRefillResult> {
+export async function refillFeedSources(
+  feedInput: string | FeedRecipeInput,
+  options: RefillFeedSourcesOptions = {}
+): Promise<FeedRefillResult> {
   const recipe = await ensureFeedRecipe(feedInput);
   const [posts, subreddits, sourceStats] = await Promise.all([
     getAllPosts(),
@@ -181,7 +192,7 @@ export async function refillFeedSources(feedInput: string | FeedRecipeInput): Pr
     getAllSourceStats(),
   ]);
   const statsByKey = getSourceStatsMap(sourceStats);
-  const plans = planFeedSourceFetches(subreddits, recipe, sourceStats, [], posts);
+  const plans = planFeedSourceFetches(subreddits, recipe, sourceStats, [], posts, { force: options.force });
   const batchId = `${recipe.id}:${Date.now()}`;
   const result: FeedRefillResult = {
     attempted: plans.length,
@@ -189,6 +200,8 @@ export async function refillFeedSources(feedInput: string | FeedRecipeInput): Pr
     failed: 0,
     mediaPosts: 0,
     newPosts: 0,
+    cacheHits: 0,
+    networkRequests: 0,
     sources: [],
     scanTargets: [],
   };
@@ -200,12 +213,27 @@ export async function refillFeedSources(feedInput: string | FeedRecipeInput): Pr
     const stats = statsByKey.get(sourceKey);
     const useAfterCursor = feedSourceUsesCursor(plan);
     scanTargets.add(plan.subreddit);
-    const fetchResult = await fetchListing({
+    const fetchSpec: FetchSpec = {
       path: getFeedSourcePath(plan),
       subreddits: [plan.subreddit],
+      sort: recipe.listingSort,
       time: sourceUsesTime(recipe) ? recipe.listingTime : undefined,
       after: useAfterCursor ? stats?.afterCursor ?? undefined : undefined,
-    }, 25, { priority: 'background' });
+    };
+
+    if (!options.forceNetwork) {
+      const cached = await readCachedListingPosts(fetchSpec, 25);
+      if (cached) {
+        result.ok += 1;
+        result.cacheHits += 1;
+        result.mediaPosts += cached.posts.length;
+        result.sources.push(`${sourceLabel} cached`);
+        continue;
+      }
+    }
+
+    result.networkRequests += 1;
+    const fetchResult = await fetchListing(fetchSpec, 25, { priority: 'background' });
 
     if (!fetchResult.ok) {
       result.failed += 1;
@@ -227,6 +255,7 @@ export async function refillFeedSources(feedInput: string | FeedRecipeInput): Pr
     result.newPosts += persisted.newPostIds.length;
     result.sources.push(sourceLabel);
     persisted.discoveredSubreddits.forEach((name) => scanTargets.add(name));
+    await writeListingCache(fetchSpec, persisted.mediaPosts, fetchResult.data.data.after, 25);
   }
 
   result.scanTargets = [...scanTargets];

@@ -8,6 +8,7 @@
 	    refillFeedSources,
     setFeedRunIndex,
     setFeedRunLocked,
+	    type RefillFeedSourcesOptions,
 	    type FeedRunState,
 	  } from '$lib/feed/engine';
 	  import { parseFeedRouteSpec, type FeedRouteSpec } from '$lib/feed/routes';
@@ -148,14 +149,17 @@
     });
   }
 
-	  async function refillSourceInventory(spec: FeedRouteSpec) {
-	    const refill = await refillFeedSources(spec);
+	  async function refillSourceInventory(spec: FeedRouteSpec, options: RefillFeedSourcesOptions = {}) {
+	    const refill = await refillFeedSources(spec, options);
 	    queueProfileScans(refill.scanTargets);
 	    return refill;
 	  }
 
   function formatRefillMessage(refill: Awaited<ReturnType<typeof refillFeedSources>>) {
-    return `refill ${refill.ok}/${refill.attempted} sources · ${refill.mediaPosts} media · ${refill.newPosts} new`;
+    const requestSummary = refill.cacheHits > 0
+      ? `${refill.networkRequests} net · ${refill.cacheHits} cached`
+      : `${refill.networkRequests} net`;
+    return `refill ${refill.ok}/${refill.attempted} sources · ${requestSummary} · ${refill.mediaPosts} media · ${refill.newPosts} new`;
   }
 
 	  $effect(() => {
@@ -424,7 +428,7 @@
     refilling = true;
     message = '';
     try {
-	      const refill = await refillSourceInventory(feedSpec);
+	      const refill = await refillSourceInventory(feedSpec, { force: true, forceNetwork: true });
 	      applyState(await buildFeedRun(feedSpec, { refreshTail: true, currentIndex }));
       message = formatRefillMessage(refill);
     } catch (refillError) {

@@ -3,7 +3,6 @@ import {
   getRouletteCandidates,
 } from '$lib/discovery/roulette';
 import {
-  feedSourceUsesCursor,
   getFeedSourceKey,
   getFeedSourceRefetchCooldownMs,
   isFeedSourceAvailable,
@@ -130,7 +129,8 @@ export function planFeedSourceFetches(
   recipe: FeedRecipe,
   sourceStats: SourceStats[],
   avoidSubreddits: string[] = [],
-  posts: PostRecord[] = []
+  posts: PostRecord[] = [],
+  options: { force?: boolean } = {}
 ): FeedSourceSpec[] {
   const now = Date.now();
   const statsByKey = getStatsMap(sourceStats);
@@ -149,18 +149,14 @@ export function planFeedSourceFetches(
         listingTime: recipe.listingTime,
       });
       const stats = statsByKey.get(sourceKey);
-      const usesCursor = feedSourceUsesCursor({
-        listingSort: recipe.listingSort,
-        listingTime: recipe.listingTime,
-      });
       const cooldownMs = getFeedSourceRefetchCooldownMs({
         listingSort: recipe.listingSort,
         listingTime: recipe.listingTime,
       });
+      if (options.force) return true;
       if (stats?.cooldownUntil && stats.cooldownUntil > now) return false;
       if (
         stats?.lastFetchedAt &&
-        (!usesCursor || !stats.afterCursor) &&
         now - stats.lastFetchedAt < cooldownMs
       ) {
         return false;
