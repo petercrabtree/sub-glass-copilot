@@ -1,7 +1,13 @@
 <script lang="ts">
-  import { CircleHelp, ExternalLink, Image as ImageIcon, ThumbsDown, ThumbsUp } from 'lucide-svelte';
+  import { CircleHelp } from 'lucide-svelte';
   import LoadedMediaChip from '$lib/components/LoadedMediaChip.svelte';
   import LoadedMediaRail from '$lib/components/LoadedMediaRail.svelte';
+  import PostActionDock from '$lib/components/PostActionDock.svelte';
+  import PostDetailsPanel from '$lib/components/PostDetailsPanel.svelte';
+  import ViewerNavGutters, {
+    type ViewerNavAction,
+    type ViewerNavZone,
+  } from '$lib/components/ViewerNavGutters.svelte';
   import type { MediaKind, PostRecord } from '$lib/types';
   import type { MediaCacheRuntimeState, MediaCacheState } from '$lib/service-worker/media-cache';
   import type { VideoPreloadState } from '$lib/media/video-preload';
@@ -10,17 +16,8 @@
     formatViewerShortcutKeys,
   } from '$lib/viewer/keyboard';
 
-  type OverlayNavAction = 'retreat' | 'advance' | 'gallery_back' | 'gallery_forward' | 'none';
   type ViewerUiMode = 'full' | 'mini' | 'hidden';
   type LoadedVideoPreloadState = VideoPreloadState | 'skipped' | 'not-planned' | 'visible';
-  type OverlayNavZone = {
-    id: string;
-    className: string;
-    glyph: string;
-    action: OverlayNavAction;
-    title?: string;
-    label: string;
-  };
   type LoadedMediaItem = {
     id: string;
     index: number;
@@ -103,13 +100,11 @@
     oncontrolleave?: () => void;
   } = $props();
 
-  let activeZoneId = $state<string | null>(null);
   let previewedLoadItemId = $state<string | null>(null);
   let overlayEl = $state<HTMLDivElement | null>(null);
 
   $effect(() => {
     void post.id;
-    activeZoneId = null;
     previewedLoadItemId = null;
   });
 
@@ -130,7 +125,8 @@
   const cachedLoadedMediaCount = $derived(
     loadedMedia.filter((item) => item.cacheState === 'cached').length
   );
-  const navZones = $derived<OverlayNavZone[]>([
+  const controlsVisible = $derived(chromeVisible && uiMode !== 'hidden');
+  const navZones = $derived<ViewerNavZone[]>([
     {
       id: 'top',
       className: 'top',
@@ -284,7 +280,7 @@
     previewedLoadItemId = itemId;
   }
 
-  function activateZone(action: OverlayNavAction) {
+  function activateZone(action: ViewerNavAction) {
     switch (action) {
       case 'retreat':
         onretreat?.();
@@ -306,7 +302,6 @@
   }
 
   function handleOverlayPointerLeave() {
-    activeZoneId = null;
     oncontrolleave?.();
   }
 
@@ -316,7 +311,6 @@
 
   function handleOverlayFocusOut(event: FocusEvent) {
     if (event.relatedTarget instanceof Node && overlayEl?.contains(event.relatedTarget)) return;
-    activeZoneId = null;
     oncontrolleave?.();
   }
 </script>
@@ -526,85 +520,37 @@
     </div>
   {/if}
 
-  <div class="post-details" class:visible={chromeVisible && uiMode !== 'hidden'}>
-    <p class="post-subreddit">r/{post.subreddit}</p>
-    <p class="post-title">{post.title}</p>
-    <p class="post-meta">
-      <span>{postIndex + 1} / {totalPosts}</span>
-      {#if totalMedia > 1}
-        <span>img {mediaIndex + 1}/{totalMedia}</span>
-      {/if}
-      <span>by u/{post.author}</span>
-      <span>{post.score} pts</span>
-      {#if post.flair}<span class="flair">{post.flair}</span>{/if}
-    </p>
-  </div>
+  <PostDetailsPanel
+    {post}
+    visible={controlsVisible}
+    {uiMode}
+    {mediaIndex}
+    {totalMedia}
+    {postIndex}
+    {totalPosts}
+  />
 
-  <div
-    class="action-dock"
-    class:visible={chromeVisible && uiMode !== 'hidden'}
-    class:vote-prompt={votePromptActive}
-  >
-    <button
-      class="btn-icon"
-      class:active={rating === 1}
-      onclick={() => onrateUp?.()}
-      title={`Thumbs up (${rateUpShortcut})`}
-      aria-label="Rate up"
-    ><ThumbsUp size={16} strokeWidth={1.9} aria-hidden="true" /></button>
-    <button
-      class="btn-icon"
-      class:active={rating === -1}
-      onclick={() => onrateDown?.()}
-      title={`Thumbs down (${rateDownShortcut})`}
-      aria-label="Rate down"
-    ><ThumbsDown size={16} strokeWidth={1.9} aria-hidden="true" /></button>
-    <button
-      class="btn-icon"
-      onclick={() => onopenReddit?.()}
-      title={`Open on Reddit (${redditShortcut})`}
-      aria-label="Open Reddit post"
-    ><ExternalLink size={16} strokeWidth={1.9} aria-hidden="true" /></button>
-    <button
-      class="btn-icon"
-      onclick={() => onopenMedia?.()}
-      title={`Open media (${mediaShortcut})`}
-      aria-label="Open media URL"
-    ><ImageIcon size={16} strokeWidth={1.9} aria-hidden="true" /></button>
-  </div>
+  <PostActionDock
+    {rating}
+    visible={controlsVisible}
+    {uiMode}
+    {votePromptActive}
+    {rateUpShortcut}
+    {rateDownShortcut}
+    {redditShortcut}
+    {mediaShortcut}
+    {onrateUp}
+    {onrateDown}
+    {onopenReddit}
+    {onopenMedia}
+  />
 
-  <div class="nav-grid" role="group" aria-label="Overlay navigation">
-    {#each navZones as zone (zone.id)}
-      <button
-        type="button"
-        class={`nav-zone ${zone.className}`}
-        data-action={zone.action}
-        data-active={zone.id === activeZoneId}
-        disabled={zone.action === 'none'}
-        aria-label={zone.label}
-        title={zone.title}
-        onclick={() => activateZone(zone.action)}
-        onpointerenter={() => {
-          activeZoneId = zone.id;
-          oncontrolenter?.();
-        }}
-        onpointerleave={() => {
-          if (activeZoneId === zone.id) {
-            activeZoneId = null;
-          }
-        }}
-        onfocus={() => {
-          activeZoneId = zone.id;
-          oncontrolenter?.();
-        }}
-        onblur={() => {
-          activeZoneId = null;
-        }}
-      >
-        <span class="zone-glyph" aria-hidden="true">{zone.glyph}</span>
-      </button>
-    {/each}
-  </div>
+  <ViewerNavGutters
+    zones={navZones}
+    {uiMode}
+    onactivate={activateZone}
+    {oncontrolenter}
+  />
 </div>
 
 <style>
@@ -615,9 +561,7 @@
     user-select: none;
   }
 
-  .top-bar,
-  .post-details,
-  .action-dock {
+  .top-bar {
     pointer-events: none;
     opacity: 0;
     transition:
@@ -646,40 +590,14 @@
     transform: translateY(-4px);
   }
 
-  .post-details {
-    left: 10px;
-    top: 48px;
-    width: min(380px, calc(100vw - 20px));
-    padding: 9px 10px;
-    display: grid;
-    align-items: start;
-    gap: 5px;
-    transform: translateY(-4px);
-    user-select: text;
-  }
-
-  .action-dock {
-    left: 10px;
-    bottom: 10px;
-    padding: 6px;
-    gap: 5px;
-    transform: translateY(4px);
-  }
-
-  .top-bar.visible,
-  .post-details.visible,
-  .action-dock.visible {
+  .top-bar.visible {
     opacity: 0.88;
     pointer-events: auto;
     transform: translateY(0);
   }
 
   .top-bar:hover,
-  .top-bar:focus-within,
-  .post-details:hover,
-  .post-details:focus-within,
-  .action-dock:hover,
-  .action-dock:focus-within {
+  .top-bar:focus-within {
     opacity: 0.98;
     background: rgba(8, 11, 15, 0.32);
     border-color: rgba(255, 255, 255, 0.09);
@@ -751,9 +669,7 @@
     cursor: help;
   }
   .load-cluster:focus-visible,
-  .help-chip:focus-visible,
-  .nav-zone:focus-visible,
-  .btn-icon:focus-visible {
+  .help-chip:focus-visible {
     outline: 2px solid rgba(106, 176, 222, 0.75);
     outline-offset: 2px;
   }
@@ -1070,187 +986,6 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     white-space: nowrap;
   }
-  .post-subreddit {
-    width: fit-content;
-    max-width: 100%;
-    padding: 3px 8px;
-    border-radius: 999px;
-    background: rgba(140, 199, 239, 0.1);
-    border: 1px solid rgba(140, 199, 239, 0.13);
-    color: rgba(158, 216, 250, 0.94);
-    font-size: 0.78rem;
-    font-weight: 700;
-    line-height: 1.1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .post-title {
-    font-size: 0.82rem;
-    font-weight: 500;
-    color: #edf6ff;
-    line-height: 1.3;
-    max-width: 100%;
-    display: -webkit-box;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    overflow: hidden;
-  }
-
-  .post-meta {
-    font-size: 0.68rem;
-    color: rgba(172, 186, 199, 0.78);
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    line-height: 1.3;
-    transition:
-      opacity 0.2s ease,
-      max-height 0.2s ease,
-      transform 0.2s ease;
-  }
-
-  .flair { color: #aaa; }
-
-  .btn-icon {
-    width: 32px;
-    height: 30px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255, 255, 255, 0.045);
-    border: 1px solid rgba(255, 255, 255, 0.075);
-    padding: 0;
-    border-radius: 10px;
-    color: rgba(229, 241, 250, 0.82);
-    pointer-events: all;
-    cursor: pointer;
-    transition:
-      background 0.15s ease,
-      border-color 0.15s ease,
-      color 0.15s ease,
-      transform 0.15s ease;
-  }
-
-  .btn-icon:hover {
-    background: rgba(255, 255, 255, 0.105);
-    border-color: rgba(255, 255, 255, 0.14);
-    color: #edf6ff;
-  }
-
-  .btn-icon.active {
-    background: rgba(106, 176, 222, 0.18);
-    border-color: rgba(106, 176, 222, 0.34);
-    color: rgba(182, 224, 252, 0.98);
-  }
-
-  .action-dock.vote-prompt {
-    border-color: rgba(164, 209, 238, 0.2);
-    box-shadow:
-      0 12px 26px rgba(0, 0, 0, 0.14),
-      0 0 0 1px rgba(164, 209, 238, 0.08);
-  }
-
-  .action-dock.vote-prompt .btn-icon:nth-child(-n + 2):not(.active) {
-    background: rgba(164, 209, 238, 0.095);
-    border-color: rgba(164, 209, 238, 0.18);
-    animation: vote-prompt-pulse 1.6s ease-in-out infinite;
-  }
-
-  .btn-icon :global(svg) {
-    display: block;
-  }
-  .nav-grid {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    grid-template-columns: minmax(108px, 24vw) 1fr minmax(108px, 24vw);
-    grid-template-rows: minmax(84px, 18vh) 1fr minmax(84px, 18vh);
-    grid-template-areas:
-      '. top .'
-      'left . right'
-      '. bottom .';
-    z-index: 1;
-    pointer-events: none;
-  }
-  .nav-zone {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: clamp(52px, 4.5vw, 68px);
-    height: clamp(52px, 4.5vw, 68px);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 999px;
-    background: rgba(8, 12, 18, 0.56);
-    backdrop-filter: blur(18px) saturate(0.95);
-    box-shadow:
-      0 18px 34px rgba(0, 0, 0, 0.28),
-      inset 0 1px 0 rgba(255, 255, 255, 0.05);
-    pointer-events: auto;
-    color: inherit;
-    position: relative;
-    margin: 18px;
-    transition:
-      background 0.18s ease,
-      border-color 0.18s ease,
-      box-shadow 0.18s ease,
-      transform 0.18s ease;
-  }
-  .nav-zone:disabled {
-    display: none;
-  }
-  .nav-zone::before {
-    content: none;
-  }
-  .nav-zone.top {
-    grid-area: top;
-    place-self: start center;
-  }
-  .nav-zone.left {
-    grid-area: left;
-    place-self: center start;
-  }
-  .nav-zone.right {
-    grid-area: right;
-    place-self: center end;
-  }
-  .nav-zone.bottom {
-    grid-area: bottom;
-    place-self: end center;
-  }
-  .nav-zone[data-active='true'],
-  .nav-zone:hover,
-  .nav-zone:focus-visible {
-    background: rgba(15, 24, 36, 0.82);
-    border-color: rgba(140, 199, 239, 0.34);
-    box-shadow:
-      0 22px 44px rgba(0, 0, 0, 0.34),
-      0 0 0 1px rgba(140, 199, 239, 0.12);
-    transform: scale(1.04);
-  }
-  .zone-glyph {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 32px;
-    min-height: 32px;
-    color: rgba(233, 233, 233, 0.78);
-    font-size: 1.45rem;
-    line-height: 1;
-    transition: color 0.18s ease, transform 0.18s ease;
-  }
-  .nav-zone[data-active='true'] .zone-glyph,
-  .nav-zone:not(:disabled):hover .zone-glyph,
-  .nav-zone:not(:disabled):focus-visible .zone-glyph {
-    color: rgba(246, 250, 255, 0.98);
-    transform: scale(1.06);
-  }
-  .nav-zone:disabled .zone-glyph {
-    color: rgba(233, 233, 233, 0.26);
-  }
-
   .overlay[data-ui-mode='mini'] .top-bar {
     max-width: min(360px, calc(100vw - 20px));
     opacity: 0.76;
@@ -1261,77 +996,9 @@
     display: none;
   }
 
-  .overlay[data-ui-mode='mini'] .post-details {
-    width: min(300px, calc(100vw - 20px));
-    opacity: 0.78;
-    gap: 4px;
-  }
-
-  .overlay[data-ui-mode='mini'] .post-title {
-    -webkit-line-clamp: 1;
-    line-clamp: 1;
-  }
-
-  .overlay[data-ui-mode='mini'] .post-meta {
-    max-height: 0;
-    opacity: 0;
-    transform: translateY(4px);
-    overflow: hidden;
-  }
-
-  .overlay[data-ui-mode='mini'] .post-details:hover .post-title,
-  .overlay[data-ui-mode='mini'] .post-details:focus-within .post-title {
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-  }
-
-  .overlay[data-ui-mode='mini'] .post-details:hover .post-meta,
-  .overlay[data-ui-mode='mini'] .post-details:focus-within .post-meta {
-    max-height: 72px;
-    opacity: 1;
-    transform: translateY(0);
-  }
-
-  .overlay[data-ui-mode='mini'] .nav-zone {
-    width: 42px;
-    height: 42px;
-    margin: 12px;
-    opacity: 0.2;
-  }
-
-  .overlay[data-ui-mode='mini'] .nav-zone:not(:disabled):hover,
-  .overlay[data-ui-mode='mini'] .nav-zone:not(:disabled):focus-visible {
-    opacity: 0.92;
-  }
-
-  .overlay[data-ui-mode='mini'] .zone-glyph {
-    font-size: 1.12rem;
-  }
-
-  .overlay[data-ui-mode='hidden'] .top-bar,
-  .overlay[data-ui-mode='hidden'] .post-details,
-  .overlay[data-ui-mode='hidden'] .action-dock,
-  .overlay[data-ui-mode='hidden'] .nav-grid {
+  .overlay[data-ui-mode='hidden'] .top-bar {
     opacity: 0;
     pointer-events: none;
-  }
-
-  @keyframes loading-pulse {
-    0%, 100% {
-      opacity: 0.6;
-    }
-    50% {
-      opacity: 1;
-    }
-  }
-
-  @keyframes vote-prompt-pulse {
-    0%, 100% {
-      box-shadow: none;
-    }
-    50% {
-      box-shadow: 0 0 0 1px rgba(164, 209, 238, 0.18);
-    }
   }
 
   @media (max-width: 720px) {
@@ -1344,13 +1011,6 @@
     }
     .subreddit {
       margin-right: auto;
-    }
-    .nav-grid {
-      grid-template-columns: minmax(76px, 26vw) 1fr minmax(76px, 26vw);
-      grid-template-rows: minmax(64px, 15vh) 1fr minmax(64px, 15vh);
-    }
-    .nav-zone {
-      margin: 12px;
     }
     .hover-panel {
       right: auto;
@@ -1412,167 +1072,12 @@
       display: none;
     }
 
-    .overlay[data-ui-mode='mini'] .post-details {
-      left: 8px;
-      top: 74px;
-      width: min(260px, calc(100vw - 16px));
-      padding: 8px 9px;
-    }
-
-    .overlay[data-ui-mode='mini'] .post-title {
-      font-size: 0.72rem;
-    }
-
-    .overlay[data-ui-mode='mini'] .nav-grid {
-      grid-template-columns: 58px 1fr 58px;
-      grid-template-rows: 58px 1fr 58px;
-    }
-
-    .overlay[data-ui-mode='mini'] .nav-zone {
-      width: 34px;
-      height: 34px;
-      margin: 8px;
-    }
-
-    .overlay[data-ui-mode='hidden'] .top-bar,
-    .overlay[data-ui-mode='hidden'] .post-details,
-    .overlay[data-ui-mode='hidden'] .action-dock,
-    .overlay[data-ui-mode='hidden'] .nav-grid {
+    .overlay[data-ui-mode='hidden'] .top-bar {
       display: none;
     }
   }
 
   .top-bar {
     display: none !important;
-  }
-
-  .post-details {
-    left: 0;
-    top: 37px;
-    width: min(390px, calc(100vw - 44px));
-    border-left: 0;
-    border-top: 0;
-    border-radius: 0 0 16px 0;
-  }
-
-  .action-dock {
-    left: 0;
-    bottom: 0;
-    border-left: 0;
-    border-bottom: 0;
-    border-radius: 0 16px 0 0;
-  }
-
-  .overlay[data-ui-mode='mini'] .post-details {
-    left: 0;
-    top: 37px;
-    width: min(300px, calc(56vw - 4px));
-    opacity: 0.78;
-  }
-
-  .overlay[data-ui-mode='mini'] .action-dock {
-    left: 0;
-    bottom: 0;
-    opacity: 0.82;
-  }
-
-  .nav-grid {
-    grid-template-columns: minmax(132px, 22vw) 1fr minmax(132px, 22vw);
-    grid-template-rows: minmax(96px, 18vh) 1fr minmax(96px, 18vh);
-  }
-
-  .nav-zone {
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    backdrop-filter: none;
-    box-shadow: none;
-    opacity: 0;
-    transform: none;
-  }
-
-  .nav-zone.top,
-  .nav-zone.left,
-  .nav-zone.right,
-  .nav-zone.bottom {
-    place-self: stretch;
-  }
-
-  .nav-zone[data-active='true'],
-  .nav-zone:hover,
-  .nav-zone:focus-visible {
-    border-color: transparent;
-    box-shadow: none;
-    transform: none;
-  }
-
-  .nav-zone.left:not(:disabled):hover,
-  .nav-zone.left:not(:disabled):focus-visible {
-    opacity: 1;
-    background: linear-gradient(90deg, rgba(140, 199, 239, 0.12), transparent);
-  }
-
-  .nav-zone.right:not(:disabled):hover,
-  .nav-zone.right:not(:disabled):focus-visible {
-    opacity: 1;
-    background: linear-gradient(270deg, rgba(140, 199, 239, 0.12), transparent);
-  }
-
-  .nav-zone.top:not(:disabled):hover,
-  .nav-zone.top:not(:disabled):focus-visible {
-    opacity: 1;
-    background: linear-gradient(180deg, rgba(140, 199, 239, 0.1), transparent);
-  }
-
-  .nav-zone.bottom:not(:disabled):hover,
-  .nav-zone.bottom:not(:disabled):focus-visible {
-    opacity: 1;
-    background: linear-gradient(0deg, rgba(140, 199, 239, 0.1), transparent);
-  }
-
-  .zone-glyph {
-    opacity: 0;
-  }
-
-  .nav-zone:not(:disabled):hover .zone-glyph,
-  .nav-zone:not(:disabled):focus-visible .zone-glyph {
-    opacity: 0.42;
-  }
-
-  .overlay[data-ui-mode='mini'] .nav-zone {
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    opacity: 0;
-  }
-
-  .overlay[data-ui-mode='mini'] .nav-zone:not(:disabled):hover,
-  .overlay[data-ui-mode='mini'] .nav-zone:not(:disabled):focus-visible {
-    opacity: 1;
-  }
-
-  @media (max-width: 720px) {
-    .post-details,
-    .overlay[data-ui-mode='mini'] .post-details {
-      left: 0;
-      top: 74px;
-      width: min(280px, calc(100vw - 44px));
-      border-radius: 0 0 14px 0;
-    }
-
-    .action-dock,
-    .overlay[data-ui-mode='mini'] .action-dock {
-      left: 0;
-      bottom: 0;
-      border-radius: 0 14px 0 0;
-    }
-
-    .nav-grid {
-      grid-template-columns: minmax(76px, 24vw) 1fr minmax(76px, 24vw);
-      grid-template-rows: minmax(74px, 16vh) 1fr minmax(74px, 16vh);
-    }
   }
 </style>
