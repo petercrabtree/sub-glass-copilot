@@ -54,6 +54,11 @@
     summary: string;
     details: WhyPostDetail[];
   };
+  type VoteNotice = {
+    label: string;
+    subreddit: string;
+    tone: 'positive' | 'negative' | 'muted';
+  };
 
   let feedName = $state('random');
   let feedState = $state<FeedRunState | null>(null);
@@ -67,6 +72,8 @@
   let refreshingTail = $state(false);
   let error = $state('');
   let message = $state('');
+  let voteNotice = $state<VoteNotice | null>(null);
+  let voteNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   let currentMediaLoadState = $state<'loading' | 'ready' | 'error'>('loading');
 
   const currentPost = $derived(posts[currentIndex]);
@@ -199,6 +206,18 @@
     });
   }
 
+  function showVoteNotice(notice: VoteNotice) {
+    if (voteNoticeTimer) {
+      clearTimeout(voteNoticeTimer);
+    }
+
+    voteNotice = notice;
+    voteNoticeTimer = setTimeout(() => {
+      voteNotice = null;
+      voteNoticeTimer = undefined;
+    }, 1600);
+  }
+
   async function persistIndex(nextIndex: number) {
     currentIndex = Math.min(Math.max(0, nextIndex), Math.max(0, posts.length - 1));
     galleryIndex = 0;
@@ -210,9 +229,17 @@
 
   async function advance() {
     if (!currentPost) return;
+    const skippedPost = currentPost;
     await markPostSeen(currentPost.id);
     await recordEvent('advance_next', currentPost);
     await recordEvent('view_end', currentPost);
+    if (skippedPost.localRating === undefined) {
+      showVoteNotice({
+        label: 'Skipped',
+        subreddit: skippedPost.subreddit,
+        tone: 'muted',
+      });
+    }
     if (currentIndex < posts.length - 1) {
       await persistIndex(currentIndex + 1);
       await recordEvent('impression', posts[currentIndex]);
@@ -260,24 +287,36 @@
 
   async function rateUp() {
     if (!currentPost) return;
-    const existing = await getPost(currentPost.id);
+    const post = currentPost;
+    const existing = await getPost(post.id);
     const newRating: 1 | undefined = existing?.localRating === 1 ? undefined : 1;
-    await setPostRating(currentPost.id, newRating);
-    posts = posts.map((post) => post.id === currentPost.id ? { ...post, localRating: newRating } : post);
-    await recordEvent('rating_explicit', currentPost, newRating ?? 0);
+    await setPostRating(post.id, newRating);
+    posts = posts.map((candidate) => candidate.id === post.id ? { ...candidate, localRating: newRating } : candidate);
+    await recordEvent('rating_explicit', post, newRating ?? 0);
     const delta = (newRating ?? 0) - (existing?.localRating ?? 0);
-    if (delta !== 0) await updateSubredditRating(currentPost.subreddit, delta);
+    if (delta !== 0) await updateSubredditRating(post.subreddit, delta);
+    showVoteNotice({
+      label: newRating === 1 ? 'Rated up' : 'Cleared rating',
+      subreddit: post.subreddit,
+      tone: newRating === 1 ? 'positive' : 'muted',
+    });
   }
 
   async function rateDown() {
     if (!currentPost) return;
-    const existing = await getPost(currentPost.id);
+    const post = currentPost;
+    const existing = await getPost(post.id);
     const newRating: -1 | undefined = existing?.localRating === -1 ? undefined : -1;
-    await setPostRating(currentPost.id, newRating);
-    posts = posts.map((post) => post.id === currentPost.id ? { ...post, localRating: newRating } : post);
-    await recordEvent('rating_explicit', currentPost, newRating ?? 0);
+    await setPostRating(post.id, newRating);
+    posts = posts.map((candidate) => candidate.id === post.id ? { ...candidate, localRating: newRating } : candidate);
+    await recordEvent('rating_explicit', post, newRating ?? 0);
     const delta = (newRating ?? 0) - (existing?.localRating ?? 0);
-    if (delta !== 0) await updateSubredditRating(currentPost.subreddit, delta);
+    if (delta !== 0) await updateSubredditRating(post.subreddit, delta);
+    showVoteNotice({
+      label: newRating === -1 ? 'Rated down' : 'Cleared rating',
+      subreddit: post.subreddit,
+      tone: newRating === -1 ? 'negative' : 'muted',
+    });
   }
 
   async function openReddit() {
@@ -346,6 +385,8 @@
     if (!action) return;
     event.preventDefault();
 
+    if (event.repeat && (action === 'rate_up_next' || action === 'rate_down_next')) return;
+
     switch (action) {
       case 'skip_forward':
       case 'step_forward':
@@ -356,10 +397,10 @@
         void retreat();
         break;
       case 'rate_up_next':
-        void rateUp().then(advance);
+        void rateUp();
         break;
       case 'rate_down_next':
-        void rateDown().then(advance);
+        void rateDown();
         break;
       case 'open_reddit':
         void openReddit();
@@ -372,7 +413,12 @@
 
   onMount(() => {
     window.addEventListener('keydown', handleKeydown);
-    return () => window.removeEventListener('keydown', handleKeydown);
+    return () => {
+      window.removeEventListener('keydown', handleKeydown);
+      if (voteNoticeTimer) {
+        clearTimeout(voteNoticeTimer);
+      }
+    };
   });
 </script>
 
@@ -444,6 +490,12 @@
         onopenReddit={openReddit}
         onopenMedia={openMedia}
       />
+      {#if voteNotice}
+        <div class="vote-notice" data-tone={voteNotice.tone} role="status" aria-live="polite">
+          <span>{voteNotice.label}</span>
+          <strong>r/{voteNotice.subreddit}</strong>
+        </div>
+      {/if}
       {#if message}
         <p class="feed-message">{message}</p>
       {/if}
@@ -532,6 +584,41 @@
   }
   .feed-state.error {
     color: #f0a0a0;
+  }
+  .vote-notice {
+    position: fixed;
+    z-index: 22;
+    left: 50%;
+    bottom: 72px;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    max-width: min(360px, calc(100vw - 32px));
+    min-height: 34px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(8, 11, 14, 0.86);
+    color: #eaf4fb;
+    font-size: 0.82rem;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+  .vote-notice strong {
+    color: #ffffff;
+    font-weight: 700;
+  }
+  .vote-notice[data-tone='positive'] {
+    border-color: rgba(142, 226, 174, 0.45);
+    background: rgba(12, 42, 26, 0.86);
+  }
+  .vote-notice[data-tone='negative'] {
+    border-color: rgba(244, 144, 144, 0.45);
+    background: rgba(52, 18, 20, 0.86);
+  }
+  .vote-notice[data-tone='muted'] {
+    color: #cbd9e3;
   }
   .feed-message {
     position: fixed;
