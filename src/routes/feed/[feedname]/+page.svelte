@@ -11,9 +11,13 @@
     type FeedRunState,
   } from '$lib/feed/engine';
   import { normalizeFeedName } from '$lib/feed/recipes';
+  import FeedQueueStatus from '$lib/components/FeedQueueStatus.svelte';
+  import FeedRouteMenu from '$lib/components/FeedRouteMenu.svelte';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
   import PostOverlay from '$lib/components/PostOverlay.svelte';
   import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
+  import ViewerBrandMenu from '$lib/components/ViewerBrandMenu.svelte';
+  import ViewerTopRail from '$lib/components/ViewerTopRail.svelte';
   import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import type {
     FeedRun,
@@ -31,6 +35,12 @@
   const INITIAL_REFILL_POST_THRESHOLD = 8;
   const AUTO_REFILL_AHEAD_THRESHOLD = 3;
   const PROFILE_SCAN_POST_TARGET_LIMIT = 8;
+  const FEED_OPTIONS = [
+    { name: 'random', label: 'random' },
+    { name: 'comfort', label: 'comfort' },
+    { name: 'fresh', label: 'fresh' },
+    { name: 'explore', label: 'explore' },
+  ] as const;
 
   type LoadedMediaStatus = 'queued' | 'seen' | 'loading' | 'ready' | 'error';
   type LoadedVideoPreloadState = VideoPreloadState | 'skipped' | 'not-planned' | 'visible';
@@ -477,150 +487,132 @@
 </svelte:head>
 
 <div class="feed-page" data-feed-status={feedStatus}>
-  <nav class="feed-rail">
-    <a href="/r/all" class="brand">SubGlass</a>
-    <a href="/feed/random" class:active={feedName === 'random'}>random</a>
-    <a href="/feed/comfort" class:active={feedName === 'comfort'}>comfort</a>
-    <a href="/feed/fresh" class:active={feedName === 'fresh'}>fresh</a>
-    <a href="/feed/explore" class:active={feedName === 'explore'}>explore</a>
-    <span class="feed-summary">{queueHealth}</span>
-    <ProfileScanStatus class="feed-scan-status" />
-    <button type="button" onclick={toggleLock} disabled={!run}>{run?.locked ? 'Unlock' : 'Lock'}</button>
-    <button type="button" onclick={refreshTail} disabled={refreshingTail || !run || run.locked}>
-      {refreshingTail ? 'Refreshing…' : 'Refresh tail'}
-    </button>
-    <button type="button" onclick={refillNow} disabled={refilling}>
-      {refilling ? 'Refilling…' : 'Refill sources'}
-    </button>
-    <button type="button" onclick={reloadRun} disabled={loading}>Reload</button>
-  </nav>
-
-  {#if loading}
-    <div class="feed-state">Loading {feedName} feed…</div>
-  {:else if error}
-    <div class="feed-state error">
-      <p>{error}</p>
-      <button type="button" onclick={() => loadFeed(feedName)}>Retry</button>
-    </div>
-  {:else if posts.length === 0}
-    <div class="feed-state empty">
-      <p>No local candidates for {feedName} yet.</p>
-      <button type="button" onclick={refillNow} disabled={refilling}>
-        {refilling ? 'Refilling…' : 'Fetch source inventory'}
-      </button>
-      {#if message}<span>{message}</span>{/if}
-    </div>
-  {:else if currentPost && currentMedia}
-    <div class="feed-viewer">
-      {#key `${currentPost.id}:${currentMedia.id}:${galleryIndex}`}
-        <MediaViewer
-          media={currentMedia}
-          itemIndex={galleryIndex}
-          fit="contain"
-          ambient={true}
-          onevent={(detail) => addEvent({ ...detail, subreddit: currentPost.subreddit, ts: Date.now(), type: detail.type as SignalEventType })}
-          onstatechange={handleMediaStateChange}
+  <div class="feed-canvas">
+    {#if loading}
+      <div class="feed-state loading">Loading {feedName} feed...</div>
+    {:else if error}
+      <div class="feed-state error">
+        <p>{error}</p>
+        <button type="button" onclick={() => loadFeed(feedName)}>Retry</button>
+      </div>
+    {:else if posts.length === 0}
+      <div class="feed-state empty">
+        <p>No local candidates for {feedName} yet.</p>
+        <button type="button" onclick={refillNow} disabled={refilling}>
+          {refilling ? 'Refilling...' : 'Fetch source inventory'}
+        </button>
+        {#if message}<span>{message}</span>{/if}
+      </div>
+    {:else if currentPost && currentMedia}
+      <div class="feed-viewer">
+        {#key `${currentPost.id}:${currentMedia.id}:${galleryIndex}`}
+          <MediaViewer
+            media={currentMedia}
+            itemIndex={galleryIndex}
+            fit="contain"
+            ambient={true}
+            onevent={(detail) => addEvent({ ...detail, subreddit: currentPost.subreddit, ts: Date.now(), type: detail.type as SignalEventType })}
+            onstatechange={handleMediaStateChange}
+          />
+        {/key}
+        <PostOverlay
+          post={currentPost}
+          showTopBar={false}
+          mediaIndex={galleryIndex}
+          totalMedia={totalItems}
+          postIndex={currentIndex}
+          totalPosts={posts.length}
+          loadedMedia={loadedMediaStates}
+          imageCacheMode={imageCacheMode}
+          whyPost={currentWhyPost}
+          onadvance={advance}
+          onretreat={retreat}
+          onadvanceGallery={advanceGallery}
+          onretreatGallery={retreatGallery}
+          onselectLoadedMedia={selectPost}
+          onrateUp={rateUp}
+          onrateDown={rateDown}
+          onopenReddit={openReddit}
+          onopenMedia={openMedia}
         />
-      {/key}
-      <PostOverlay
-        post={currentPost}
-        mediaIndex={galleryIndex}
-        totalMedia={totalItems}
-        postIndex={currentIndex}
-        totalPosts={posts.length}
+        {#if voteNotice}
+          <div class="vote-notice" data-tone={voteNotice.tone} role="status" aria-live="polite">
+            <span>{voteNotice.label}</span>
+            <strong>r/{voteNotice.subreddit}</strong>
+          </div>
+        {/if}
+        {#if message}
+          <p class="feed-message">{message}</p>
+        {/if}
+      </div>
+    {/if}
+  </div>
+
+  <ViewerTopRail ariaLabel="Feed viewer controls">
+    {#snippet left()}
+      <ViewerBrandMenu />
+      <FeedRouteMenu feedName={feedName} recipe={feedState?.recipe} options={FEED_OPTIONS} />
+      <ProfileScanStatus class="feed-scan-status" />
+    {/snippet}
+
+    {#snippet right()}
+      <FeedQueueStatus
+        {feedStatus}
+        {queueHealth}
+        postsLength={posts.length}
+        {currentIndex}
+        currentSubreddit={currentPost?.subreddit}
+        locked={run?.locked ?? false}
+        canToggleLock={!!run}
+        canRefreshTail={!!run && !run.locked}
+        {loading}
+        {refilling}
+        {refreshingTail}
         loadedMedia={loadedMediaStates}
-        imageCacheMode={imageCacheMode}
-        whyPost={currentWhyPost}
-        onadvance={advance}
-        onretreat={retreat}
-        onadvanceGallery={advanceGallery}
-        onretreatGallery={retreatGallery}
-        onselectLoadedMedia={selectPost}
-        onrateUp={rateUp}
-        onrateDown={rateDown}
-        onopenReddit={openReddit}
-        onopenMedia={openMedia}
+        {items}
+        onToggleLock={toggleLock}
+        onRefreshTail={refreshTail}
+        onRefillNow={refillNow}
+        onReloadRun={reloadRun}
       />
-      {#if voteNotice}
-        <div class="vote-notice" data-tone={voteNotice.tone} role="status" aria-live="polite">
-          <span>{voteNotice.label}</span>
-          <strong>r/{voteNotice.subreddit}</strong>
-        </div>
-      {/if}
-      {#if message}
-        <p class="feed-message">{message}</p>
-      {/if}
-    </div>
-  {/if}
+    {/snippet}
+  </ViewerTopRail>
 </div>
 
 <style>
   .feed-page {
     min-height: 100vh;
-    background: #060708;
+    background:
+      radial-gradient(circle at top, rgba(64, 108, 148, 0.18), transparent 42%),
+      linear-gradient(180deg, #07090d 0%, #050608 50%, #030305 100%);
     color: #eef5fb;
+    overflow: hidden;
+    isolation: isolate;
+    user-select: none;
   }
-  .feed-rail {
-    position: fixed;
-    z-index: 20;
-    top: 0;
-    left: 0;
-    right: auto;
-    max-width: min(720px, calc(100vw - 20px));
-    min-height: 38px;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 6px 8px;
-    background: rgba(6, 7, 8, 0.82);
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    border-bottom-right-radius: 8px;
-    backdrop-filter: blur(14px);
+
+  .feed-page button {
+    font: inherit;
   }
-  .feed-rail a,
-  .feed-rail button,
-  .feed-summary,
-  :global(.feed-scan-status) {
-    min-height: 26px;
-    display: inline-flex;
-    align-items: center;
-    border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.06);
-    color: #dbe8f3;
-    font-size: 0.72rem;
-    text-decoration: none;
-    padding: 0 9px;
+
+  .feed-canvas,
+  .feed-viewer {
+    position: relative;
+    min-height: 100vh;
   }
-  .feed-rail button {
-    cursor: pointer;
-  }
-  .feed-rail button:disabled {
-    cursor: not-allowed;
-    opacity: 0.45;
-  }
-  .feed-rail a.active {
-    background: rgba(145, 205, 236, 0.2);
-    border-color: rgba(145, 205, 236, 0.42);
-    color: #f4fbff;
-  }
-  .brand {
-    font-weight: 700;
-  }
-  .feed-summary {
-    color: #aebfcb;
-    background: rgba(255, 255, 255, 0.035);
-  }
-  :global(.feed-scan-status) {
-    max-width: 180px;
-  }
+
   .feed-viewer {
     width: 100vw;
     height: 100vh;
     overflow: hidden;
   }
+
+  :global(.feed-scan-status) {
+    max-width: 180px;
+    overflow: hidden;
+    padding: 0 8px;
+  }
+
   .feed-state {
     min-height: 100vh;
     display: grid;
@@ -628,11 +620,19 @@
     gap: 14px;
     color: #b7c5cf;
     text-align: center;
+    padding: 96px 24px 40px;
   }
+
+  .loading,
+  .empty {
+    font-size: clamp(1rem, 2vw, 1.2rem);
+    text-transform: uppercase;
+  }
+
   .feed-state button {
     justify-self: center;
     border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 6px;
+    border-radius: 10px;
     background: rgba(255, 255, 255, 0.08);
     color: #eef5fb;
     padding: 8px 12px;
@@ -642,7 +642,7 @@
   }
   .vote-notice {
     position: fixed;
-    z-index: 22;
+    z-index: 42;
     left: 50%;
     bottom: 72px;
     display: flex;
@@ -651,7 +651,7 @@
     max-width: min(360px, calc(100vw - 32px));
     min-height: 34px;
     padding: 8px 12px;
-    border-radius: 8px;
+    border-radius: 12px;
     border: 1px solid rgba(255, 255, 255, 0.14);
     background: rgba(8, 11, 14, 0.86);
     color: #eaf4fb;
@@ -677,27 +677,22 @@
   }
   .feed-message {
     position: fixed;
-    z-index: 21;
-    top: 48px;
+    z-index: 41;
+    top: 46px;
     right: 10px;
     max-width: min(520px, calc(100vw - 20px));
     margin: 0;
     padding: 7px 10px;
-    border-radius: 6px;
+    border-radius: 10px;
     background: rgba(10, 14, 18, 0.82);
     border: 1px solid rgba(255, 255, 255, 0.1);
     color: #b7d7ea;
     font-size: 0.75rem;
   }
+
   @media (max-width: 760px) {
-    .feed-rail {
-      top: 48px;
-      overflow-x: auto;
-      align-items: stretch;
-    }
-    .feed-summary {
-      margin-left: 0;
-      white-space: nowrap;
+    :global(.feed-scan-status) {
+      display: none;
     }
   }
 </style>
