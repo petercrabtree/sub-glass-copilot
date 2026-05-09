@@ -1,9 +1,24 @@
 <script lang="ts">
+  import { getDefaultFeedRoutePath, getFeedRoutePath } from '$lib/feed/routes';
+  import type { RedditListingSort, RedditListingTime } from '$lib/types';
+
   const feeds = [
     { name: 'random', label: 'Random mix', detail: 'Balanced local queue with fair source spread.' },
     { name: 'comfort', label: 'Comfort', detail: 'Higher weight for positively rated sources.' },
-    { name: 'fresh', label: 'Fresh', detail: 'Newer source pulls with local quality checks.' },
+    { name: 'fresh', label: 'Fresh', detail: 'Newer local picks with quality checks.' },
     { name: 'explore', label: 'Explore', detail: 'More room for unrated and newly discovered sources.' },
+  ];
+
+  const sourceLinks: Array<{
+    label: string;
+    listingSort: RedditListingSort;
+    listingTime?: RedditListingTime;
+  }> = [
+    { label: 'top/month', listingSort: 'top', listingTime: 'month' },
+    { label: 'hot', listingSort: 'hot' },
+    { label: 'new', listingSort: 'new' },
+    { label: 'rising', listingSort: 'rising' },
+    { label: 'controversial/month', listingSort: 'controversial', listingTime: 'month' },
   ];
 </script>
 
@@ -23,11 +38,20 @@
     <h1>Feeds</h1>
     <div class="feed-list">
       {#each feeds as feed}
-        <a href="/feed/{feed.name}" class="feed-link">
-          <strong>{feed.label}</strong>
-          <span>/feed/{feed.name}</span>
+        <div class="feed-link">
+          <a href={getDefaultFeedRoutePath(feed.name)} class="feed-primary">
+            <strong>{feed.label}</strong>
+            <span>{getDefaultFeedRoutePath(feed.name)}</span>
+          </a>
           <p>{feed.detail}</p>
-        </a>
+          <div class="source-links">
+            {#each sourceLinks as source}
+              <a href={getFeedRoutePath({ feedName: feed.name, listingSort: source.listingSort, listingTime: source.listingTime })}>
+                {source.label}
+              </a>
+            {/each}
+          </div>
+        </div>
       {/each}
     </div>
   </section>
@@ -46,7 +70,9 @@
     margin-bottom: 40px;
   }
   nav a,
-  .feed-link {
+  .feed-link,
+  .feed-primary,
+  .source-links a {
     color: inherit;
     text-decoration: none;
   }
@@ -74,7 +100,11 @@
     border-radius: 8px;
     background: rgba(255, 255, 255, 0.045);
   }
-  .feed-link span {
+  .feed-primary {
+    display: grid;
+    gap: 5px;
+  }
+  .feed-primary span {
     color: #8fb6d0;
     font-size: 0.78rem;
   }
@@ -83,5 +113,21 @@
     color: #aebdc8;
     font-size: 0.86rem;
   }
+  .source-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .source-links a {
+    min-height: 28px;
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid rgba(143, 182, 208, 0.2);
+    border-radius: 8px;
+    background: rgba(143, 182, 208, 0.08);
+    color: #b8d4e6;
+    font-size: 0.74rem;
+    padding: 0 8px;
+  }
 </style>
-

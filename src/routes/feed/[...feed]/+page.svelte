@@ -2,15 +2,15 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import { getPost, markPostSeen, setPostRating, updateSubredditRating, addEvent } from '$lib/db/store';
-  import {
-    buildFeedRun,
-    loadFeedRun,
-    refillFeedSources,
+	  import {
+	    buildFeedRun,
+	    loadFeedRun,
+	    refillFeedSources,
     setFeedRunIndex,
     setFeedRunLocked,
-    type FeedRunState,
-  } from '$lib/feed/engine';
-  import { normalizeFeedName } from '$lib/feed/recipes';
+	    type FeedRunState,
+	  } from '$lib/feed/engine';
+	  import { parseFeedRouteSpec, type FeedRouteSpec } from '$lib/feed/routes';
   import FeedQueueStatus from '$lib/components/FeedQueueStatus.svelte';
   import FeedRouteMenu from '$lib/components/FeedRouteMenu.svelte';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
@@ -76,8 +76,8 @@
     tone: 'positive' | 'negative' | 'muted';
   };
 
-  let feedName = $state('random');
-  let feedState = $state<FeedRunState | null>(null);
+	  let feedSpec = $state<FeedRouteSpec>(parseFeedRouteSpec(undefined));
+	  let feedState = $state<FeedRunState | null>(null);
   let posts = $state<PostRecord[]>([]);
   let items = $state<FeedRunItem[]>([]);
   let run = $state<FeedRun | null>(null);
@@ -86,13 +86,16 @@
   let loading = $state(true);
   let refilling = $state(false);
   let refreshingTail = $state(false);
-  let error = $state('');
-  let message = $state('');
-  let voteNotice = $state<VoteNotice | null>(null);
-  let voteNoticeTimer: ReturnType<typeof setTimeout> | undefined;
-  let currentMediaLoadState = $state<'loading' | 'ready' | 'error'>('loading');
+	  let error = $state('');
+	  let message = $state('');
+	  let voteNotice = $state<VoteNotice | null>(null);
+	  let voteNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+	  let currentMediaLoadState = $state<'loading' | 'ready' | 'error'>('loading');
+	  let loadingRouteKey = $state('');
 
-  const currentPost = $derived(posts[currentIndex]);
+	  const feedName = $derived(feedSpec.feedName);
+	  const sourceSummary = $derived(feedSpec.sourceSummary);
+	  const currentPost = $derived(posts[currentIndex]);
   const currentRunItem = $derived(items[currentIndex]);
   const currentMedia = $derived(currentPost?.media);
   const currentItem = $derived(currentMedia?.items?.[galleryIndex] ?? currentMedia?.items?.[0]);
@@ -145,22 +148,27 @@
     });
   }
 
-  async function refillSourceInventory(name: string) {
-    const refill = await refillFeedSources(name);
-    queueProfileScans(refill.scanTargets);
-    return refill;
-  }
+	  async function refillSourceInventory(spec: FeedRouteSpec) {
+	    const refill = await refillFeedSources(spec);
+	    queueProfileScans(refill.scanTargets);
+	    return refill;
+	  }
 
   function formatRefillMessage(refill: Awaited<ReturnType<typeof refillFeedSources>>) {
     return `refill ${refill.ok}/${refill.attempted} sources · ${refill.mediaPosts} media · ${refill.newPosts} new`;
   }
 
-  $effect(() => {
-    const nextFeedName = normalizeFeedName($page.params.feedname);
-    if (nextFeedName === feedName && feedState) return;
-    feedName = nextFeedName;
-    void loadFeed(nextFeedName);
-  });
+	  $effect(() => {
+	    const nextFeedSpec = parseFeedRouteSpec($page.params.feed, $page.url.searchParams);
+	    if (
+	      nextFeedSpec.routeKey === feedSpec.routeKey &&
+	      (feedState || loadingRouteKey === nextFeedSpec.routeKey)
+	    ) {
+	      return;
+	    }
+	    feedSpec = nextFeedSpec;
+	    void loadFeed(nextFeedSpec);
+	  });
 
   function applyState(nextState: FeedRunState) {
     feedState = nextState;
@@ -172,28 +180,34 @@
     resetMediaState();
   }
 
-  async function loadFeed(name: string) {
-    loading = true;
-    error = '';
-    message = '';
-    try {
-      const initial = await buildFeedRun(name);
-      if (initial.posts.length < INITIAL_REFILL_POST_THRESHOLD) {
-        refilling = true;
-        const refill = await refillSourceInventory(name);
-        message = formatRefillMessage(refill);
-        applyState(await buildFeedRun(name, { refreshTail: true }));
-      } else {
-        applyState(initial);
-        queueProfileScans(getPostScanTargets(initial.posts));
+	  async function loadFeed(spec: FeedRouteSpec) {
+	    const routeKey = spec.routeKey;
+	    loadingRouteKey = routeKey;
+	    loading = true;
+	    error = '';
+	    message = '';
+	    try {
+	      const initial = await buildFeedRun(spec);
+	      if (routeKey !== feedSpec.routeKey) return;
+	      if (initial.posts.length < INITIAL_REFILL_POST_THRESHOLD) {
+	        refilling = true;
+	        const refill = await refillSourceInventory(spec);
+	        if (routeKey !== feedSpec.routeKey) return;
+	        message = formatRefillMessage(refill);
+	        applyState(await buildFeedRun(spec, { refreshTail: true }));
+	      } else {
+	        applyState(initial);
+	        queueProfileScans(getPostScanTargets(initial.posts));
       }
-    } catch (loadError) {
-      error = loadError instanceof Error ? loadError.message : String(loadError);
-    } finally {
-      refilling = false;
-      loading = false;
-    }
-  }
+	    } catch (loadError) {
+	      error = loadError instanceof Error ? loadError.message : String(loadError);
+	    } finally {
+	      if (routeKey === feedSpec.routeKey) {
+	        refilling = false;
+	        loading = false;
+	      }
+	    }
+	  }
 
   function resetMediaState() {
     currentMediaLoadState = currentMedia ? 'loading' : 'error';
@@ -225,8 +239,8 @@
 
   function buildWhyPostInfo(post: PostRecord | undefined, item: FeedRunItem | undefined): WhyPostInfo | undefined {
     if (!post || !item) return undefined;
-    const details: WhyPostDetail[] = [
-      { label: 'feed', value: `${feedName} · ${item.committed ? 'committed' : 'tail'}` },
+	    const details: WhyPostDetail[] = [
+	      { label: 'feed', value: `${feedName} · ${sourceSummary} · ${item.committed ? 'committed' : 'tail'}` },
       { label: 'source', value: item.sourceLabel ?? post.fetchedInRoute ?? 'local db' },
       { label: 'slot', value: item.slot },
       { label: 'score', value: item.score.toFixed(2), tone: item.score >= 0 ? 'positive' : 'negative' },
@@ -236,7 +250,7 @@
     ];
 
     return {
-      summary: `${feedName} · score ${item.score.toFixed(1)} · ${item.sourceLabel ?? `r/${post.subreddit}`}`,
+	      summary: `${feedName}/${sourceSummary} · score ${item.score.toFixed(1)} · ${item.sourceLabel ?? `r/${post.subreddit}`}`,
       details: details.slice(0, 10),
     };
   }
@@ -384,16 +398,16 @@
     refreshingTail = true;
     message = '';
     try {
-      const refreshed = await buildFeedRun(feedName, { refreshTail: true, currentIndex });
-      applyState(refreshed);
-      queueProfileScans(getPostScanTargets(refreshed.posts, refreshed.run.currentIndex));
+	      const refreshed = await buildFeedRun(feedSpec, { refreshTail: true, currentIndex });
+	      applyState(refreshed);
+	      queueProfileScans(getPostScanTargets(refreshed.posts, refreshed.run.currentIndex));
 
-      if (getAheadCount(refreshed.posts, refreshed.run.currentIndex) <= AUTO_REFILL_AHEAD_THRESHOLD && !refilling) {
-        startedRefill = true;
-        refilling = true;
-        const refill = await refillSourceInventory(feedName);
-        applyState(await buildFeedRun(feedName, { refreshTail: true, currentIndex }));
-        message = `tail refreshed · ${formatRefillMessage(refill)}`;
+	      if (getAheadCount(refreshed.posts, refreshed.run.currentIndex) <= AUTO_REFILL_AHEAD_THRESHOLD && !refilling) {
+	        startedRefill = true;
+	        refilling = true;
+	        const refill = await refillSourceInventory(feedSpec);
+	        applyState(await buildFeedRun(feedSpec, { refreshTail: true, currentIndex }));
+	        message = `tail refreshed · ${formatRefillMessage(refill)}`;
       } else {
         message = 'tail refreshed from local candidates';
       }
@@ -410,8 +424,8 @@
     refilling = true;
     message = '';
     try {
-      const refill = await refillSourceInventory(feedName);
-      applyState(await buildFeedRun(feedName, { refreshTail: true, currentIndex }));
+	      const refill = await refillSourceInventory(feedSpec);
+	      applyState(await buildFeedRun(feedSpec, { refreshTail: true, currentIndex }));
       message = formatRefillMessage(refill);
     } catch (refillError) {
       error = refillError instanceof Error ? refillError.message : String(refillError);
@@ -427,9 +441,9 @@
   }
 
   async function reloadRun() {
-    loading = true;
-    try {
-      applyState(await loadFeedRun(feedName));
+	    loading = true;
+	    try {
+	      applyState(await loadFeedRun(feedSpec));
     } finally {
       loading = false;
     }
@@ -482,22 +496,22 @@
   });
 </script>
 
-<svelte:head>
-  <title>SubGlass Feed · {feedName}</title>
-</svelte:head>
+	<svelte:head>
+	  <title>SubGlass Feed · {feedName} · {sourceSummary}</title>
+	</svelte:head>
 
 <div class="feed-page" data-feed-status={feedStatus}>
   <div class="feed-canvas">
-    {#if loading}
-      <div class="feed-state loading">Loading {feedName} feed...</div>
-    {:else if error}
-      <div class="feed-state error">
-        <p>{error}</p>
-        <button type="button" onclick={() => loadFeed(feedName)}>Retry</button>
-      </div>
-    {:else if posts.length === 0}
-      <div class="feed-state empty">
-        <p>No local candidates for {feedName} yet.</p>
+	    {#if loading}
+	      <div class="feed-state loading">Loading {feedName} {sourceSummary} feed...</div>
+	    {:else if error}
+	      <div class="feed-state error">
+	        <p>{error}</p>
+	        <button type="button" onclick={() => loadFeed(feedSpec)}>Retry</button>
+	      </div>
+	    {:else if posts.length === 0}
+	      <div class="feed-state empty">
+	        <p>No local candidates for {feedName} {sourceSummary} yet.</p>
         <button type="button" onclick={refillNow} disabled={refilling}>
           {refilling ? 'Refilling...' : 'Fetch source inventory'}
         </button>
@@ -550,8 +564,8 @@
 
   <ViewerTopRail ariaLabel="Feed viewer controls">
     {#snippet left()}
-      <ViewerBrandMenu />
-      <FeedRouteMenu feedName={feedName} recipe={feedState?.recipe} options={FEED_OPTIONS} />
+	      <ViewerBrandMenu />
+	      <FeedRouteMenu routeSpec={feedSpec} recipe={feedState?.recipe} options={FEED_OPTIONS} />
       <ProfileScanStatus class="feed-scan-status" />
     {/snippet}
 

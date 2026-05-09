@@ -12,6 +12,7 @@ import {
 import { extractLinksFromPost } from '$lib/adjacency/extract';
 import { enrichRedgifsPosts } from '$lib/media/redgifs';
 import { normalizeListingResponse } from '$lib/normalize/posts';
+import { getCanonicalListingTime, normalizeRedditListingSort } from '$lib/reddit/listing';
 import {
   getFeedSourceKey,
   getFeedSourceLabel,
@@ -84,12 +85,15 @@ export async function normalizeListingMediaPosts(listing: RedditListingResponse)
 }
 
 function createFallbackSourceStats(context: PersistFetchedPostsContext, sourceKey: string, sourceLabel: string): SourceStats {
+  const listingSort = normalizeRedditListingSort(context.listingSort, 'hot');
+  const listingTime = getCanonicalListingTime(listingSort, context.listingTime);
+
   return {
     sourceKey,
     sourceLabel,
     subreddit: normalizeSourceSubreddit(context.subreddit),
-    listingSort: context.listingSort,
-    listingTime: context.listingTime,
+    listingSort,
+    listingTime,
     fetchCount: 0,
     postsReturned: 0,
     mediaPostsReturned: 0,
@@ -109,6 +113,8 @@ export async function persistFetchedPosts(
   const fetchedAt = context.fetchedAt ?? Date.now();
   const batchId = context.batchId ?? `${sourceKey}:${fetchedAt}`;
   const rawPostsReturned = context.rawPostsReturned ?? mediaPosts.length;
+  const listingSort = normalizeRedditListingSort(context.listingSort, 'hot');
+  const listingTime = getCanonicalListingTime(listingSort, context.listingTime);
   const newPostIds: string[] = [];
   const duplicatePostIds: string[] = [];
   const discoveredSubreddits = new Set<string>();
@@ -134,8 +140,8 @@ export async function persistFetchedPosts(
       sourceLabel,
       subreddit: routedPost.subreddit,
       routePath,
-      listingSort: context.listingSort,
-      listingTime: context.listingTime,
+      listingSort,
+      listingTime,
       listingPosition,
       fetchedAt,
       isMultireddit: context.isMultireddit ?? false,
@@ -162,8 +168,8 @@ export async function persistFetchedPosts(
     ...(existingStats ?? createFallbackSourceStats(context, sourceKey, sourceLabel)),
     sourceLabel,
     subreddit: normalizeSourceSubreddit(context.subreddit),
-    listingSort: context.listingSort,
-    listingTime: context.listingTime,
+    listingSort,
+    listingTime,
     afterCursor: context.afterCursor,
     lastFetchedAt: fetchedAt,
     lastError: undefined,
@@ -192,7 +198,7 @@ export async function persistListingResponse(
   const mediaPosts = await normalizeListingMediaPosts(listing);
   return persistFetchedPosts(mediaPosts, {
     ...context,
-    afterCursor: context.afterCursor ?? listing.data.after,
+    afterCursor: context.afterCursor === undefined ? listing.data.after : context.afterCursor,
     rawPostsReturned: context.rawPostsReturned ?? listing.data.children.length,
   });
 }
@@ -205,13 +211,15 @@ export async function markSourceFetchFailed(
   const sourceKey = getFeedSourceKey(context);
   const sourceLabel = getFeedSourceLabel(context);
   const existingStats = await getSourceStats(sourceKey);
+  const listingSort = normalizeRedditListingSort(context.listingSort, 'hot');
+  const listingTime = getCanonicalListingTime(listingSort, context.listingTime);
 
   await upsertSourceStats({
     ...(existingStats ?? createFallbackSourceStats(context, sourceKey, sourceLabel)),
     sourceLabel,
     subreddit: normalizeSourceSubreddit(context.subreddit),
-    listingSort: context.listingSort,
-    listingTime: context.listingTime,
+    listingSort,
+    listingTime,
     lastError: error,
     cooldownUntil,
     updatedAt: Date.now(),

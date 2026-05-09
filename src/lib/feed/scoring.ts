@@ -9,6 +9,7 @@ import type {
   SubredditRecord,
 } from '$lib/types';
 import {
+  feedSourceUsesCursor,
   getFeedSourceKey,
   getFeedSourceLabel,
   getFeedSourceRoutePath,
@@ -77,6 +78,14 @@ function chooseBestSource(sources: PostSource[] | undefined): PostSource | undef
   )[0];
 }
 
+function sourceMatchesRecipe(source: PostSource, recipe: FeedRecipe): boolean {
+  return source.sourceKey === getFeedSourceKey({
+    subreddit: source.subreddit,
+    listingSort: recipe.listingSort,
+    listingTime: recipe.listingTime,
+  });
+}
+
 function createLocalPostSourceFallback(post: PostRecord, recipe: FeedRecipe): PostSource {
   const sourceSpec = {
     subreddit: post.subreddit,
@@ -98,8 +107,19 @@ function createLocalPostSourceFallback(post: PostRecord, recipe: FeedRecipe): Po
   };
 }
 
-function getCandidateSource(post: PostRecord, recipe: FeedRecipe, sourcesByPost: Map<string, PostSource[]>): PostSource {
-  return chooseBestSource(sourcesByPost.get(post.id)) ?? createLocalPostSourceFallback(post, recipe);
+function getCandidateSource(
+  post: PostRecord,
+  recipe: FeedRecipe,
+  sourcesByPost: Map<string, PostSource[]>
+): PostSource | undefined {
+  const sources = sourcesByPost.get(post.id);
+  const matchingSources = sources?.filter((source) => sourceMatchesRecipe(source, recipe));
+  const matchingSource = chooseBestSource(matchingSources);
+  if (matchingSource) return matchingSource;
+
+  return !sources || sources.length === 0
+    ? createLocalPostSourceFallback(post, recipe)
+    : undefined;
 }
 
 function isRecipeNsfwMatch(post: PostRecord, recipe: FeedRecipe): boolean {
@@ -157,6 +177,8 @@ export function scoreFeedCandidates(context: FeedScoringContext): FeedCandidate[
       const postEvents = eventsByPost.get(post.id) ?? [];
       let score = 0;
 
+      if (!source) return null;
+
       if (context.seenPostIds.has(post.id)) {
         score += addDetail(details, 'seen', 'seen', 'already viewed', -80, 'negative');
       }
@@ -190,7 +212,10 @@ export function scoreFeedCandidates(context: FeedScoringContext): FeedCandidate[
         sourceRankScore > 0 ? 'positive' : 'muted'
       );
 
-      const sourceYieldScore = (getSourceYieldScore(source ? statsBySource.get(source.sourceKey) : undefined) - 0.6) * 5;
+      const duplicatePenaltyWeight = feedSourceUsesCursor(context.recipe) ? 0.7 : 0.2;
+      const sourceYieldScore = (
+        getSourceYieldScore(statsBySource.get(source.sourceKey), duplicatePenaltyWeight) - 0.6
+      ) * 5;
       score += addDetail(
         details,
         'source-yield',

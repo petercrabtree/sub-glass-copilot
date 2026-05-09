@@ -3,7 +3,9 @@ import {
   getRouletteCandidates,
 } from '$lib/discovery/roulette';
 import {
+  feedSourceUsesCursor,
   getFeedSourceKey,
+  getFeedSourceRefetchCooldownMs,
   isFeedSourceAvailable,
   normalizeSourceSubreddit,
   type FeedSourceSpec,
@@ -16,7 +18,6 @@ import type {
   SubredditRouletteSettings,
 } from '$lib/types';
 
-const SOURCE_REFETCH_COOLDOWN_MS = 30 * 60 * 1000;
 const DEFAULT_BOOTSTRAP_SOURCE = 'nsfw';
 
 function getRecipeRouletteWeights(recipe: FeedRecipe): Pick<
@@ -148,11 +149,19 @@ export function planFeedSourceFetches(
         listingTime: recipe.listingTime,
       });
       const stats = statsByKey.get(sourceKey);
+      const usesCursor = feedSourceUsesCursor({
+        listingSort: recipe.listingSort,
+        listingTime: recipe.listingTime,
+      });
+      const cooldownMs = getFeedSourceRefetchCooldownMs({
+        listingSort: recipe.listingSort,
+        listingTime: recipe.listingTime,
+      });
       if (stats?.cooldownUntil && stats.cooldownUntil > now) return false;
       if (
         stats?.lastFetchedAt &&
-        !stats.afterCursor &&
-        now - stats.lastFetchedAt < SOURCE_REFETCH_COOLDOWN_MS
+        (!usesCursor || !stats.afterCursor) &&
+        now - stats.lastFetchedAt < cooldownMs
       ) {
         return false;
       }

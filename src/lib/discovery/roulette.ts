@@ -5,9 +5,16 @@ import type {
   SubredditRouletteSettings,
 } from '$lib/types';
 import { isSubredditUnavailable } from '$lib/db/store';
+import {
+  REDDIT_LISTING_SORTS,
+  REDDIT_LISTING_TIMES,
+  normalizeRedditListingSort,
+  normalizeRedditListingTime,
+  redditListingSortUsesTime,
+} from '$lib/reddit/listing';
 
-export const ROULETTE_LISTING_SORTS: RedditListingSort[] = ['hot', 'new', 'top', 'rising', 'controversial'];
-export const ROULETTE_LISTING_TIMES: RedditListingTime[] = ['hour', 'day', 'week', 'month', 'year', 'all'];
+export const ROULETTE_LISTING_SORTS: readonly RedditListingSort[] = REDDIT_LISTING_SORTS;
+export const ROULETTE_LISTING_TIMES: readonly RedditListingTime[] = REDDIT_LISTING_TIMES;
 
 export const DEFAULT_ROULETTE_SETTINGS: SubredditRouletteSettings = {
   subredditCount: 10,
@@ -85,19 +92,15 @@ function normalizeNsfwMode(settings: StoredRouletteSettings | null | undefined):
 }
 
 function normalizeListingSort(value: unknown): RedditListingSort {
-  return ROULETTE_LISTING_SORTS.includes(value as RedditListingSort)
-    ? (value as RedditListingSort)
-    : DEFAULT_ROULETTE_SETTINGS.listingSort;
+  return normalizeRedditListingSort(value, DEFAULT_ROULETTE_SETTINGS.listingSort);
 }
 
 function normalizeListingTime(value: unknown): RedditListingTime {
-  return ROULETTE_LISTING_TIMES.includes(value as RedditListingTime)
-    ? (value as RedditListingTime)
-    : DEFAULT_ROULETTE_SETTINGS.listingTime;
+  return normalizeRedditListingTime(value, DEFAULT_ROULETTE_SETTINGS.listingTime);
 }
 
 export function isTimedRouletteListingSort(sort: RedditListingSort): boolean {
-  return sort === 'top' || sort === 'controversial';
+  return redditListingSortUsesTime(sort);
 }
 
 export function readStoredRouletteSettings(): SubredditRouletteSettings {

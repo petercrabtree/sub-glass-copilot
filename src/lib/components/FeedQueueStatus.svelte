@@ -62,7 +62,8 @@
 </script>
 
 <div class="feed-queue-status" role="group" aria-label="Feed queue controls" data-locked={locked}>
-  <span class="viewer-top-chip status-count">{positionLabel}</span>
+  <span class="viewer-top-chip status-count counter">{positionLabel}</span>
+  <span class="feed-summary smoke-metadata" aria-hidden="true">{queueHealth}</span>
   {#if currentSubreddit}
     <span class="viewer-top-chip status-subreddit">r/{currentSubreddit}</span>
   {/if}
@@ -143,6 +144,15 @@
     justify-content: flex-end;
     min-width: 0;
     gap: 4px;
+  }
+
+  .smoke-metadata {
+    position: fixed;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .status-count,

@@ -13,11 +13,17 @@ import {
   replaceFeedRunItems,
 } from '$lib/db/store';
 import { fetchListing } from '$lib/transport/reddit';
-import { ensureFeedRecipe } from '$lib/feed/recipes';
+import { ensureFeedRecipe, type FeedRecipeInput } from '$lib/feed/recipes';
 import { persistListingResponse, markSourceFetchFailed } from '$lib/feed/ingest';
 import { mixFeedQueue } from '$lib/feed/mixer';
 import { planFeedSourceFetches } from '$lib/feed/source-planner';
-import { getFeedSourceKey, getFeedSourceLabel, getFeedSourcePath, getFeedSourceRoutePath } from '$lib/feed/source';
+import {
+  feedSourceUsesCursor,
+  getFeedSourceKey,
+  getFeedSourceLabel,
+  getFeedSourcePath,
+  getFeedSourceRoutePath,
+} from '$lib/feed/source';
 import { scoreFeedCandidates } from '$lib/feed/scoring';
 import type { FeedRecipe, FeedRun, FeedRunItem, PostRecord, SourceStats } from '$lib/types';
 
@@ -71,8 +77,8 @@ async function getRunPosts(items: FeedRunItem[]): Promise<PostRecord[]> {
     .filter((post): post is PostRecord => Boolean(post?.media));
 }
 
-export async function loadFeedRun(feedName: string): Promise<FeedRunState> {
-  const recipe = await ensureFeedRecipe(feedName);
+export async function loadFeedRun(feedInput: string | FeedRecipeInput): Promise<FeedRunState> {
+  const recipe = await ensureFeedRecipe(feedInput);
   const run = await getActiveFeedRun(recipe.id) ?? createRun(recipe);
   const items = await getFeedRunItems(run.id);
   return {
@@ -84,10 +90,10 @@ export async function loadFeedRun(feedName: string): Promise<FeedRunState> {
 }
 
 export async function buildFeedRun(
-  feedName: string,
+  feedInput: string | FeedRecipeInput,
   options: BuildFeedRunOptions = {}
 ): Promise<FeedRunState> {
-  const recipe = await ensureFeedRecipe(feedName);
+  const recipe = await ensureFeedRecipe(feedInput);
   const existingRun = await getActiveFeedRun(recipe.id);
   const run = existingRun ?? createRun(recipe);
   const existingItems = existingRun ? await getFeedRunItems(run.id) : [];
@@ -167,8 +173,8 @@ function getSourceStatsMap(stats: SourceStats[]): Map<string, SourceStats> {
   return new Map(stats.map((entry) => [entry.sourceKey, entry]));
 }
 
-export async function refillFeedSources(feedName: string): Promise<FeedRefillResult> {
-  const recipe = await ensureFeedRecipe(feedName);
+export async function refillFeedSources(feedInput: string | FeedRecipeInput): Promise<FeedRefillResult> {
+  const recipe = await ensureFeedRecipe(feedInput);
   const [posts, subreddits, sourceStats] = await Promise.all([
     getAllPosts(),
     getAllSubreddits(),
@@ -192,12 +198,13 @@ export async function refillFeedSources(feedName: string): Promise<FeedRefillRes
     const sourceKey = getFeedSourceKey(plan);
     const sourceLabel = getFeedSourceLabel(plan);
     const stats = statsByKey.get(sourceKey);
+    const useAfterCursor = feedSourceUsesCursor(plan);
     scanTargets.add(plan.subreddit);
     const fetchResult = await fetchListing({
       path: getFeedSourcePath(plan),
       subreddits: [plan.subreddit],
       time: sourceUsesTime(recipe) ? recipe.listingTime : undefined,
-      after: stats?.afterCursor ?? undefined,
+      after: useAfterCursor ? stats?.afterCursor ?? undefined : undefined,
     }, 25, { priority: 'background' });
 
     if (!fetchResult.ok) {
@@ -211,7 +218,7 @@ export async function refillFeedSources(feedName: string): Promise<FeedRefillRes
       routePath: getFeedSourceRoutePath(plan),
       recipeId: recipe.id,
       batchId,
-      afterCursor: fetchResult.data.data.after,
+      afterCursor: useAfterCursor ? fetchResult.data.data.after : null,
       isMultireddit: false,
       rawPostsReturned: fetchResult.data.data.children.length,
     });

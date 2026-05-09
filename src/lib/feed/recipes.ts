@@ -1,7 +1,21 @@
 import { getFeedRecipe, upsertFeedRecipe } from '$lib/db/store';
+import {
+  DEFAULT_REDDIT_LISTING_SORT,
+  DEFAULT_REDDIT_LISTING_TIME,
+  getCanonicalListingTime,
+  normalizeRedditListingSort,
+  normalizeRedditListingTime,
+  redditListingSortUsesTime,
+} from '$lib/reddit/listing';
 import type { FeedRecipe, FeedRecipeSourceMode, RedditListingSort, RedditListingTime } from '$lib/types';
 
 const FEED_NAME_PATTERN = /^[a-z0-9_-]{1,40}$/i;
+
+export interface FeedRecipeInput {
+  feedName: string;
+  listingSort?: RedditListingSort;
+  listingTime?: RedditListingTime;
+}
 
 type RecipePreset = Omit<FeedRecipe, 'id' | 'name' | 'createdAt' | 'updatedAt'> & {
   name: string;
@@ -43,8 +57,8 @@ const RECIPE_PRESETS: Record<string, RecipePreset> = {
     description: 'Favor newer posts from known available sources.',
     sourceMode: 'fresh',
     nsfwMode: 'only',
-    listingSort: 'new',
-    listingTime: 'day',
+    listingSort: 'top',
+    listingTime: 'month',
     sourceCount: 12,
     targetQueueSize: 40,
     committedAheadCount: 4,
@@ -92,12 +106,12 @@ function clampWeight(value: number): number {
   return Math.min(2, Math.max(0, Number(value.toFixed(2))));
 }
 
-function normalizeSort(sort: RedditListingSort): RedditListingSort {
-  return sort;
+function normalizeSort(sort: RedditListingSort | undefined): RedditListingSort {
+  return normalizeRedditListingSort(sort, DEFAULT_REDDIT_LISTING_SORT);
 }
 
-function normalizeTime(time: RedditListingTime): RedditListingTime {
-  return time;
+function normalizeTime(sort: RedditListingSort, time: RedditListingTime | undefined): RedditListingTime {
+  return getCanonicalListingTime(sort, time, DEFAULT_REDDIT_LISTING_TIME) ?? DEFAULT_REDDIT_LISTING_TIME;
 }
 
 function normalizeSourceMode(mode: FeedRecipeSourceMode): FeedRecipeSourceMode {
@@ -105,12 +119,15 @@ function normalizeSourceMode(mode: FeedRecipeSourceMode): FeedRecipeSourceMode {
 }
 
 export function normalizeFeedRecipe(recipe: FeedRecipe): FeedRecipe {
+  const listingSort = normalizeSort(recipe.listingSort);
+  const listingTime = normalizeTime(listingSort, recipe.listingTime);
+
   return {
     ...recipe,
     name: normalizeFeedName(recipe.name),
     sourceMode: normalizeSourceMode(recipe.sourceMode),
-    listingSort: normalizeSort(recipe.listingSort),
-    listingTime: normalizeTime(recipe.listingTime),
+    listingSort,
+    listingTime,
     sourceCount: clampInt(recipe.sourceCount, 1, 24),
     targetQueueSize: clampInt(recipe.targetQueueSize, 8, 120),
     committedAheadCount: clampInt(recipe.committedAheadCount, 1, 12),
@@ -121,20 +138,52 @@ export function normalizeFeedRecipe(recipe: FeedRecipe): FeedRecipe {
   };
 }
 
-export async function ensureFeedRecipe(feedNameInput: string | undefined): Promise<FeedRecipe> {
-  const feedName = normalizeFeedName(feedNameInput);
-  const existing = await getFeedRecipe(feedName);
+export function getFeedRecipeId(input: FeedRecipeInput): string {
+  const feedName = normalizeFeedName(input.feedName);
+  const listingSort = normalizeSort(input.listingSort);
+  const listingTime = normalizeTime(listingSort, input.listingTime);
+  return redditListingSortUsesTime(listingSort)
+    ? `${feedName}:${listingSort}:${listingTime}`
+    : `${feedName}:${listingSort}`;
+}
+
+export function normalizeFeedRecipeInput(feedInput: string | FeedRecipeInput | undefined): FeedRecipeInput {
+  if (typeof feedInput === 'string' || !feedInput) {
+    return {
+      feedName: normalizeFeedName(feedInput),
+      listingSort: DEFAULT_REDDIT_LISTING_SORT,
+      listingTime: DEFAULT_REDDIT_LISTING_TIME,
+    };
+  }
+
+  const listingSort = normalizeSort(feedInput.listingSort);
+  const listingTime = normalizeTime(listingSort, normalizeRedditListingTime(feedInput.listingTime));
+
+  return {
+    feedName: normalizeFeedName(feedInput.feedName),
+    listingSort,
+    listingTime,
+  };
+}
+
+export async function ensureFeedRecipe(feedInput: string | FeedRecipeInput | undefined): Promise<FeedRecipe> {
+  const recipeInput = normalizeFeedRecipeInput(feedInput);
+  const feedName = normalizeFeedName(recipeInput.feedName);
+  const recipeId = getFeedRecipeId(recipeInput);
+  const existing = await getFeedRecipe(recipeId);
   if (existing) return normalizeFeedRecipe(existing);
 
   const preset = getPreset(feedName);
   const now = Date.now();
   const recipe = normalizeFeedRecipe({
-    id: feedName,
+    id: recipeId,
     ...preset,
+    name: feedName,
+    listingSort: recipeInput.listingSort ?? DEFAULT_REDDIT_LISTING_SORT,
+    listingTime: recipeInput.listingTime ?? DEFAULT_REDDIT_LISTING_TIME,
     createdAt: now,
     updatedAt: now,
   });
   await upsertFeedRecipe(recipe);
   return recipe;
 }
-
