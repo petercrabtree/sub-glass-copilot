@@ -36,6 +36,8 @@
     getSubreddit, updateSubredditRating, getFeedSnapshot, setFeedSnapshot,
     getPostsByIds, getAllSubreddits, isSubredditUnavailable, getEventsForPost,
   } from '$lib/db/store';
+  import LoadedMediaChip from '$lib/components/LoadedMediaChip.svelte';
+  import LoadedMediaRail from '$lib/components/LoadedMediaRail.svelte';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
   import PostOverlay from '$lib/components/PostOverlay.svelte';
   import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
@@ -597,6 +599,10 @@
       case 'skipped':
         return 'n/a';
     }
+  }
+
+  function describeLoadedMediaQueueChip(item: LoadedMediaQueueItem): string {
+    return `#${item.index + 1} · ${formatLoadedMediaKind(item.kind)} · ${item.status} · ${formatLoadedMediaCacheState(item.cacheState)} · ${formatLoadedMediaVideoPreloadState(item)} · ${item.title}`;
   }
 
   function getPreferredVideoPreloadLimit(): number {
@@ -3349,21 +3355,11 @@
 	        <details class="status-menu">
 	          <summary aria-label={`Loaded queue showing ${loadedMediaStates.length} items, ${mediaReadinessSummary}`}>
 	            <span class="status-label">queue</span>
-	            <span class="load-rail" aria-hidden="true">
-	              {#each loadedMediaStates as item (item.id)}
-	                <span
-	                  class="load-chip"
-	                  class:rating-up={item.rating === 1}
-	                  class:rating-down={item.rating === -1}
-	                  class:current={item.index === currentIndex}
-	                  data-kind={item.kind}
-	                  data-status={item.status}
-	                  data-cache={item.cacheState}
-	                  data-video-preload={item.videoPreloadState}
-	                  title={`#${item.index + 1} · ${formatLoadedMediaKind(item.kind)} · ${item.status} · ${formatLoadedMediaCacheState(item.cacheState)} · ${formatLoadedMediaVideoPreloadState(item)} · ${item.title}`}
-	                ></span>
-	              {/each}
-	            </span>
+	            <LoadedMediaRail
+	              items={loadedMediaStates}
+	              {currentIndex}
+	              titleForItem={describeLoadedMediaQueueChip}
+	            />
 	          </summary>
 	          <div class="status-menu-panel">
 	            <div class="status-panel-section">
@@ -3385,16 +3381,7 @@
 	                    onclick={() => selectPost(item.index)}
 	                  >
 	                    <span class="queue-item-index">{item.index + 1}</span>
-	                    <span
-	                      class="load-chip"
-	                      class:rating-up={item.rating === 1}
-	                      class:rating-down={item.rating === -1}
-	                      class:current={item.index === currentIndex}
-	                      data-kind={item.kind}
-	                      data-status={item.status}
-	                      data-cache={item.cacheState}
-	                      data-video-preload={item.videoPreloadState}
-	                    ></span>
+	                    <LoadedMediaChip item={item} {currentIndex} />
 	                    <span class="queue-item-copy">
 	                      <span class="queue-item-title">{item.title}</span>
 	                      <span class="queue-item-meta">
@@ -5538,118 +5525,6 @@
     background: rgba(140, 199, 239, 0.14);
     border-color: rgba(140, 199, 239, 0.24);
     color: #edf6ff;
-  }
-
-  .load-rail {
-    display: inline-flex;
-    align-items: center;
-    flex: 1 1 auto;
-    gap: 4px;
-    min-width: 32px;
-    overflow: hidden;
-  }
-
-  .load-chip {
-    position: relative;
-    display: inline-flex;
-    flex: 0 0 auto;
-    width: 8px;
-    height: 16px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.18);
-    overflow: hidden;
-    transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
-  }
-
-  .load-chip[data-kind='gallery'] {
-    width: 12px;
-    border-radius: 4px;
-  }
-
-  .load-chip[data-kind='video'] {
-    width: 14px;
-    border-radius: 5px;
-  }
-
-  .load-chip.current {
-    transform: translateY(-1px);
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
-  }
-
-  .load-chip[data-status='queued'] {
-    background: rgba(255, 255, 255, 0.16);
-  }
-
-  .load-chip[data-status='seen'] {
-    background: rgba(255, 255, 255, 0.34);
-  }
-
-  .load-chip[data-status='loading'] {
-    background: rgba(214, 176, 103, 0.68);
-    animation: loading-pulse 1.4s ease-in-out infinite;
-  }
-
-  .load-chip[data-status='ready'] {
-    background: rgba(106, 176, 222, 0.82);
-  }
-
-  .load-chip[data-status='error'] {
-    background: rgba(190, 101, 101, 0.82);
-  }
-
-  .load-chip[data-cache='cached'] {
-    box-shadow: 0 0 0 1px rgba(113, 212, 136, 0.78);
-  }
-
-  .load-chip[data-cache='live'],
-  .load-chip[data-cache='checking'] {
-    opacity: 0.78;
-  }
-
-  .load-chip[data-cache='inactive'],
-  .load-chip[data-cache='unsupported'],
-  .load-chip[data-cache='skipped'] {
-    opacity: 0.52;
-  }
-
-  .load-chip[data-kind='video']::before {
-    content: '';
-    position: absolute;
-    inset: 2px 2px auto;
-    height: 3px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.26);
-  }
-
-  .load-chip[data-video-preload='warming']::before,
-  .load-chip[data-video-preload='metadata']::before {
-    background: rgba(232, 189, 95, 0.86);
-  }
-
-  .load-chip[data-video-preload='ready']::before,
-  .load-chip[data-video-preload='buffered']::before,
-  .load-chip[data-video-preload='visible']::before {
-    background: rgba(113, 212, 136, 0.92);
-  }
-
-  .load-chip[data-video-preload='error']::before {
-    background: rgba(222, 126, 126, 0.92);
-  }
-
-  .load-chip::after {
-    content: '';
-    position: absolute;
-    inset: auto 0 0;
-    height: 3px;
-    background: transparent;
-  }
-
-  .load-chip.rating-up::after {
-    background: #71d488;
-  }
-
-  .load-chip.rating-down::after {
-    background: #de7e7e;
   }
 
   .status-menu-panel {

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { CircleHelp, ExternalLink, Image as ImageIcon, ThumbsDown, ThumbsUp } from 'lucide-svelte';
+  import LoadedMediaChip from '$lib/components/LoadedMediaChip.svelte';
+  import LoadedMediaRail from '$lib/components/LoadedMediaRail.svelte';
   import type { MediaKind, PostRecord } from '$lib/types';
   import type { MediaCacheRuntimeState, MediaCacheState } from '$lib/service-worker/media-cache';
   import type { VideoPreloadState } from '$lib/media/video-preload';
@@ -355,21 +357,11 @@
               <span class="cache-summary" data-cache-mode={imageCacheMode}>
                 {describeLoadedMediaCacheMode()}
               </span>
-              <span class="load-rail" aria-hidden="true">
-                {#each loadedMedia as item (item.id)}
-                  <span
-                    class="load-chip"
-                    class:rating-up={item.rating === 1}
-                    class:rating-down={item.rating === -1}
-                    class:current={item.index === postIndex}
-                    data-kind={item.kind}
-                    data-status={item.status}
-                    data-cache={item.cacheState}
-                    data-video-preload={item.videoPreloadState}
-                    title={describeLoadedMedia(item)}
-                  ></span>
-                {/each}
-              </span>
+              <LoadedMediaRail
+                items={loadedMedia}
+                currentIndex={postIndex}
+                titleForItem={describeLoadedMedia}
+              />
             </button>
             <div class="hover-panel queue-panel">
               <div class="queue-panel-header">
@@ -415,16 +407,7 @@
                       onblur={() => previewLoadedMediaItem(null)}
                     >
                       <span class="queue-item-leading">
-                        <span
-                          class="load-chip"
-                          class:rating-up={item.rating === 1}
-                          class:rating-down={item.rating === -1}
-                          class:current={item.index === postIndex}
-                          data-kind={item.kind}
-                          data-status={item.status}
-                          data-cache={item.cacheState}
-                          data-video-preload={item.videoPreloadState}
-                        ></span>
+                        <LoadedMediaChip item={item} currentIndex={postIndex} />
                         <span class="queue-index">{item.index + 1}</span>
                       </span>
                       <span class="queue-item-copy">
@@ -792,96 +775,6 @@
   .cache-summary[data-cache-mode='inactive'],
   .cache-summary[data-cache-mode='unsupported'] {
     color: #9d9d9d;
-  }
-  .load-rail {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .load-chip {
-    position: relative;
-    display: inline-flex;
-    width: 8px;
-    height: 16px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.18);
-    overflow: hidden;
-    transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
-  }
-  .load-chip[data-kind='gallery'] {
-    width: 12px;
-    border-radius: 4px;
-  }
-  .load-chip[data-kind='video'] {
-    width: 14px;
-    border-radius: 5px;
-  }
-  .load-chip.current {
-    transform: translateY(-1px);
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
-  }
-  .load-chip[data-status='queued'] {
-    background: rgba(255, 255, 255, 0.16);
-  }
-  .load-chip[data-status='seen'] {
-    background: rgba(255, 255, 255, 0.34);
-  }
-  .load-chip[data-status='loading'] {
-    background: rgba(214, 176, 103, 0.68);
-  }
-  .load-chip[data-status='loading'] {
-    animation: loading-pulse 1.4s ease-in-out infinite;
-  }
-  .load-chip[data-status='ready'] {
-    background: rgba(106, 176, 222, 0.82);
-  }
-  .load-chip[data-status='error'] {
-    background: rgba(190, 101, 101, 0.82);
-  }
-  .load-chip[data-cache='cached'] {
-    box-shadow: 0 0 0 1px rgba(113, 212, 136, 0.78);
-  }
-  .load-chip[data-cache='live'],
-  .load-chip[data-cache='checking'] {
-    opacity: 0.78;
-  }
-  .load-chip[data-cache='inactive'],
-  .load-chip[data-cache='unsupported'],
-  .load-chip[data-cache='skipped'] {
-    opacity: 0.52;
-  }
-  .load-chip[data-kind='video']::before {
-    content: '';
-    position: absolute;
-    inset: 2px 2px auto;
-    height: 3px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.26);
-  }
-  .load-chip[data-video-preload='warming']::before,
-  .load-chip[data-video-preload='metadata']::before {
-    background: rgba(232, 189, 95, 0.86);
-  }
-  .load-chip[data-video-preload='ready']::before,
-  .load-chip[data-video-preload='buffered']::before,
-  .load-chip[data-video-preload='visible']::before {
-    background: rgba(113, 212, 136, 0.92);
-  }
-  .load-chip[data-video-preload='error']::before {
-    background: rgba(222, 126, 126, 0.92);
-  }
-  .load-chip::after {
-    content: '';
-    position: absolute;
-    inset: auto 0 0;
-    height: 3px;
-    background: transparent;
-  }
-  .load-chip.rating-up::after {
-    background: #71d488;
-  }
-  .load-chip.rating-down::after {
-    background: #de7e7e;
   }
   .hover-panel {
     position: absolute;
@@ -1515,7 +1408,7 @@
       overflow: hidden;
     }
 
-    .overlay[data-ui-mode='mini'] .load-rail .load-chip:nth-child(n + 5) {
+    .overlay[data-ui-mode='mini'] :global(.load-rail .load-chip:nth-child(n + 5)) {
       display: none;
     }
 
