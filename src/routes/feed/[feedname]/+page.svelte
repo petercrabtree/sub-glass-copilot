@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
+  import { ChevronDown, Database, Lock, RefreshCw, RotateCcw, Unlock } from 'lucide-svelte';
   import { getPost, markPostSeen, setPostRating, updateSubredditRating, addEvent } from '$lib/db/store';
   import {
     buildFeedRun,
@@ -31,6 +32,12 @@
   const INITIAL_REFILL_POST_THRESHOLD = 8;
   const AUTO_REFILL_AHEAD_THRESHOLD = 3;
   const PROFILE_SCAN_POST_TARGET_LIMIT = 8;
+  const FEED_OPTIONS = [
+    { name: 'random', label: 'random' },
+    { name: 'comfort', label: 'comfort' },
+    { name: 'fresh', label: 'fresh' },
+    { name: 'explore', label: 'explore' },
+  ] as const;
 
   type LoadedMediaStatus = 'queued' | 'seen' | 'loading' | 'ready' | 'error';
   type LoadedVideoPreloadState = VideoPreloadState | 'skipped' | 'not-planned' | 'visible';
@@ -477,150 +484,584 @@
 </svelte:head>
 
 <div class="feed-page" data-feed-status={feedStatus}>
-  <nav class="feed-rail">
-    <a href="/r/all" class="brand">SubGlass</a>
-    <a href="/feed/random" class:active={feedName === 'random'}>random</a>
-    <a href="/feed/comfort" class:active={feedName === 'comfort'}>comfort</a>
-    <a href="/feed/fresh" class:active={feedName === 'fresh'}>fresh</a>
-    <a href="/feed/explore" class:active={feedName === 'explore'}>explore</a>
-    <span class="feed-summary">{queueHealth}</span>
-    <ProfileScanStatus class="feed-scan-status" />
-    <button type="button" onclick={toggleLock} disabled={!run}>{run?.locked ? 'Unlock' : 'Lock'}</button>
-    <button type="button" onclick={refreshTail} disabled={refreshingTail || !run || run.locked}>
-      {refreshingTail ? 'Refreshing…' : 'Refresh tail'}
-    </button>
-    <button type="button" onclick={refillNow} disabled={refilling}>
-      {refilling ? 'Refilling…' : 'Refill sources'}
-    </button>
-    <button type="button" onclick={reloadRun} disabled={loading}>Reload</button>
-  </nav>
-
-  {#if loading}
-    <div class="feed-state">Loading {feedName} feed…</div>
-  {:else if error}
-    <div class="feed-state error">
-      <p>{error}</p>
-      <button type="button" onclick={() => loadFeed(feedName)}>Retry</button>
-    </div>
-  {:else if posts.length === 0}
-    <div class="feed-state empty">
-      <p>No local candidates for {feedName} yet.</p>
-      <button type="button" onclick={refillNow} disabled={refilling}>
-        {refilling ? 'Refilling…' : 'Fetch source inventory'}
-      </button>
-      {#if message}<span>{message}</span>{/if}
-    </div>
-  {:else if currentPost && currentMedia}
-    <div class="feed-viewer">
-      {#key `${currentPost.id}:${currentMedia.id}:${galleryIndex}`}
-        <MediaViewer
-          media={currentMedia}
-          itemIndex={galleryIndex}
-          fit="contain"
-          ambient={true}
-          onevent={(detail) => addEvent({ ...detail, subreddit: currentPost.subreddit, ts: Date.now(), type: detail.type as SignalEventType })}
-          onstatechange={handleMediaStateChange}
+  <div class="feed-canvas">
+    {#if loading}
+      <div class="feed-state loading">Loading {feedName} feed...</div>
+    {:else if error}
+      <div class="feed-state error">
+        <p>{error}</p>
+        <button type="button" onclick={() => loadFeed(feedName)}>Retry</button>
+      </div>
+    {:else if posts.length === 0}
+      <div class="feed-state empty">
+        <p>No local candidates for {feedName} yet.</p>
+        <button type="button" onclick={refillNow} disabled={refilling}>
+          {refilling ? 'Refilling...' : 'Fetch source inventory'}
+        </button>
+        {#if message}<span>{message}</span>{/if}
+      </div>
+    {:else if currentPost && currentMedia}
+      <div class="feed-viewer">
+        {#key `${currentPost.id}:${currentMedia.id}:${galleryIndex}`}
+          <MediaViewer
+            media={currentMedia}
+            itemIndex={galleryIndex}
+            fit="contain"
+            ambient={true}
+            onevent={(detail) => addEvent({ ...detail, subreddit: currentPost.subreddit, ts: Date.now(), type: detail.type as SignalEventType })}
+            onstatechange={handleMediaStateChange}
+          />
+        {/key}
+        <PostOverlay
+          post={currentPost}
+          showTopBar={false}
+          mediaIndex={galleryIndex}
+          totalMedia={totalItems}
+          postIndex={currentIndex}
+          totalPosts={posts.length}
+          loadedMedia={loadedMediaStates}
+          imageCacheMode={imageCacheMode}
+          whyPost={currentWhyPost}
+          onadvance={advance}
+          onretreat={retreat}
+          onadvanceGallery={advanceGallery}
+          onretreatGallery={retreatGallery}
+          onselectLoadedMedia={selectPost}
+          onrateUp={rateUp}
+          onrateDown={rateDown}
+          onopenReddit={openReddit}
+          onopenMedia={openMedia}
         />
-      {/key}
-      <PostOverlay
-        post={currentPost}
-        mediaIndex={galleryIndex}
-        totalMedia={totalItems}
-        postIndex={currentIndex}
-        totalPosts={posts.length}
-        loadedMedia={loadedMediaStates}
-        imageCacheMode={imageCacheMode}
-        whyPost={currentWhyPost}
-        onadvance={advance}
-        onretreat={retreat}
-        onadvanceGallery={advanceGallery}
-        onretreatGallery={retreatGallery}
-        onselectLoadedMedia={selectPost}
-        onrateUp={rateUp}
-        onrateDown={rateDown}
-        onopenReddit={openReddit}
-        onopenMedia={openMedia}
-      />
-      {#if voteNotice}
-        <div class="vote-notice" data-tone={voteNotice.tone} role="status" aria-live="polite">
-          <span>{voteNotice.label}</span>
-          <strong>r/{voteNotice.subreddit}</strong>
+        {#if voteNotice}
+          <div class="vote-notice" data-tone={voteNotice.tone} role="status" aria-live="polite">
+            <span>{voteNotice.label}</span>
+            <strong>r/{voteNotice.subreddit}</strong>
+          </div>
+        {/if}
+        {#if message}
+          <p class="feed-message">{message}</p>
+        {/if}
+      </div>
+    {/if}
+  </div>
+
+  <nav class="feed-topbar" aria-label="Feed viewer controls">
+    <div class="feed-topbar-nav">
+      <details class="topbar-menu brand-menu">
+        <summary class="brand" aria-label="SubGlass menu">SubGlass</summary>
+        <div class="topbar-menu-panel brand-panel">
+          <div class="menu-section">
+            <span class="menu-label">places</span>
+            <div class="nav-links">
+              <a href="/r/all">viewer</a>
+              <a href="/feed/random">feed</a>
+              <a href="/roulette">roulette</a>
+              <a href="/discover">discover</a>
+              <a href="/admin">admin</a>
+            </div>
+          </div>
         </div>
-      {/if}
-      {#if message}
-        <p class="feed-message">{message}</p>
-      {/if}
+      </details>
+
+      <details class="topbar-menu feed-menu">
+        <summary class="feed-route-chip" aria-label={`Current feed ${feedName}`}>
+          <span>feed</span>
+          <strong>{feedName}</strong>
+          <ChevronDown size={13} strokeWidth={2} aria-hidden="true" />
+        </summary>
+        <div class="topbar-menu-panel feed-panel">
+          <div class="menu-section">
+            <span class="menu-label">feeds</span>
+            <div class="feed-switcher" aria-label="Local feeds">
+              {#each FEED_OPTIONS as option}
+                <a href="/feed/{option.name}" class:active={feedName === option.name}>{option.label}</a>
+              {/each}
+            </div>
+          </div>
+
+          <div class="menu-section">
+            <span class="menu-label">recipe</span>
+            <div class="recipe-grid">
+              <span>mode</span>
+              <strong>{feedState?.recipe.sourceMode ?? '...'}</strong>
+              <span>sort</span>
+              <strong>
+                {feedState?.recipe.listingSort ?? '...'}
+                {#if feedState?.recipe.listingSort === 'top' || feedState?.recipe.listingSort === 'controversial'}
+                  / {feedState.recipe.listingTime}
+                {/if}
+              </strong>
+              <span>sources</span>
+              <strong>{feedState?.recipe.sourceCount ?? '...'}</strong>
+              <span>target</span>
+              <strong>{feedState?.recipe.targetQueueSize ?? '...'}</strong>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <ProfileScanStatus class="feed-scan-status" />
     </div>
-  {/if}
+
+    <div
+      class="feed-status"
+      role="group"
+      aria-label="Feed queue controls"
+      data-locked={run?.locked}
+    >
+      <span class="status-count">
+        {#if posts.length > 0}
+          {currentIndex + 1} / {posts.length}
+        {:else}
+          {feedStatus}
+        {/if}
+      </span>
+      {#if currentPost}
+        <span class="status-subreddit">r/{currentPost.subreddit}</span>
+      {/if}
+      <span class="status-chip lock-state" data-locked={run?.locked}>
+        {#if run?.locked}
+          <Lock size={13} strokeWidth={2} aria-hidden="true" />
+          locked
+        {:else}
+          open
+        {/if}
+      </span>
+
+      <details class="status-menu">
+        <summary aria-label={`Feed queue: ${queueHealth}`}>
+          <span class="status-label">queue</span>
+          <span class="load-rail" aria-hidden="true">
+            {#each loadedMediaStates.slice(Math.max(0, currentIndex - 3), currentIndex + 13) as item (item.id)}
+              <span
+                class="load-chip"
+                class:rating-up={item.rating === 1}
+                class:rating-down={item.rating === -1}
+                class:current={item.index === currentIndex}
+                data-kind={item.kind}
+                data-status={item.status}
+                title={`#${item.index + 1} · ${item.slot ?? 'tail'} · ${item.sourceLabel ?? 'local'} · ${item.title}`}
+              ></span>
+            {/each}
+          </span>
+        </summary>
+        <div class="status-menu-panel">
+          <section class="status-panel-section">
+            <div class="status-panel-heading">
+              <span>queue</span>
+              <span>{queueHealth}</span>
+            </div>
+            <div class="queue-facts">
+              <span>run</span>
+              <strong>{run?.locked ? 'locked' : 'open'}</strong>
+              <span>committed</span>
+              <strong>{items.filter((item) => item.committed).length}</strong>
+              <span>tail</span>
+              <strong>{items.filter((item) => !item.committed).length}</strong>
+              <span>sources</span>
+              <strong>{new Set(items.map((item) => item.sourceKey).filter(Boolean)).size}</strong>
+            </div>
+          </section>
+
+          <section class="status-panel-section">
+            <div class="status-panel-heading">
+              <span>feed actions</span>
+              <span>{refilling ? 'refilling' : refreshingTail ? 'refreshing' : 'ready'}</span>
+            </div>
+            <div class="feed-action-grid">
+              <button type="button" onclick={toggleLock} disabled={!run}>
+                {#if run?.locked}
+                  <Unlock size={15} strokeWidth={2} aria-hidden="true" />
+                  <span>unlock</span>
+                {:else}
+                  <Lock size={15} strokeWidth={2} aria-hidden="true" />
+                  <span>lock</span>
+                {/if}
+              </button>
+              <button type="button" onclick={refreshTail} disabled={refreshingTail || !run || run.locked}>
+                <RefreshCw size={15} strokeWidth={2} aria-hidden="true" />
+                <span>{refreshingTail ? 'refreshing' : 'refresh tail'}</span>
+              </button>
+              <button type="button" onclick={refillNow} disabled={refilling}>
+                <Database size={15} strokeWidth={2} aria-hidden="true" />
+                <span>{refilling ? 'refilling' : 'refill sources'}</span>
+              </button>
+              <button type="button" onclick={reloadRun} disabled={loading}>
+                <RotateCcw size={15} strokeWidth={2} aria-hidden="true" />
+                <span>reload</span>
+              </button>
+            </div>
+          </section>
+        </div>
+      </details>
+    </div>
+  </nav>
 </div>
 
 <style>
   .feed-page {
     min-height: 100vh;
-    background: #060708;
+    background:
+      radial-gradient(circle at top, rgba(64, 108, 148, 0.18), transparent 42%),
+      linear-gradient(180deg, #07090d 0%, #050608 50%, #030305 100%);
     color: #eef5fb;
+    overflow: hidden;
+    isolation: isolate;
+    user-select: none;
   }
-  .feed-rail {
-    position: fixed;
-    z-index: 20;
-    top: 0;
-    left: 0;
-    right: auto;
-    max-width: min(720px, calc(100vw - 20px));
-    min-height: 38px;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 6px 8px;
-    background: rgba(6, 7, 8, 0.82);
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    border-bottom-right-radius: 8px;
-    backdrop-filter: blur(14px);
+
+  .feed-page button,
+  .feed-page summary {
+    font: inherit;
   }
-  .feed-rail a,
-  .feed-rail button,
-  .feed-summary,
-  :global(.feed-scan-status) {
-    min-height: 26px;
-    display: inline-flex;
-    align-items: center;
-    border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.06);
-    color: #dbe8f3;
-    font-size: 0.72rem;
+
+  .feed-page a {
+    color: inherit;
     text-decoration: none;
-    padding: 0 9px;
   }
-  .feed-rail button {
-    cursor: pointer;
+
+  .feed-canvas,
+  .feed-viewer {
+    position: relative;
+    min-height: 100vh;
   }
-  .feed-rail button:disabled {
-    cursor: not-allowed;
-    opacity: 0.45;
-  }
-  .feed-rail a.active {
-    background: rgba(145, 205, 236, 0.2);
-    border-color: rgba(145, 205, 236, 0.42);
-    color: #f4fbff;
-  }
-  .brand {
-    font-weight: 700;
-  }
-  .feed-summary {
-    color: #aebfcb;
-    background: rgba(255, 255, 255, 0.035);
-  }
-  :global(.feed-scan-status) {
-    max-width: 180px;
-  }
+
   .feed-viewer {
     width: 100vw;
     height: 100vh;
     overflow: hidden;
   }
+
+  .feed-topbar {
+    position: fixed;
+    z-index: 40;
+    top: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    min-height: 38px;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(8, 11, 15, 0.62);
+    backdrop-filter: blur(20px) saturate(1.05);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.22);
+  }
+
+  .feed-topbar-nav,
+  .feed-status {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 4px;
+    padding: 4px 6px;
+  }
+
+  .feed-topbar-nav {
+    flex: 1 1 auto;
+  }
+
+  .feed-status {
+    flex: 0 1 auto;
+    justify-content: flex-end;
+    max-width: min(64vw, 760px);
+    border-left: 1px solid rgba(255, 255, 255, 0.07);
+    overflow: visible;
+  }
+
+  .brand,
+  .feed-route-chip,
+  .status-count,
+  .status-subreddit,
+  .status-chip,
+  .status-menu summary,
+  :global(.feed-scan-status) {
+    display: inline-flex;
+    min-height: 28px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.045);
+    color: rgba(229, 241, 250, 0.86);
+    font-size: 0.72rem;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .brand {
+    padding: 5px 9px;
+    color: rgba(198, 226, 246, 0.88);
+    font-weight: 700;
+  }
+
+  .feed-route-chip {
+    gap: 6px;
+    padding: 0 8px;
+  }
+
+  .feed-route-chip span {
+    color: rgba(166, 178, 190, 0.86);
+  }
+
+  .feed-route-chip strong,
+  .status-subreddit {
+    color: rgba(154, 211, 247, 0.92);
+  }
+
+  .brand:hover,
+  .brand:focus-visible,
+  .topbar-menu[open] .brand,
+  .feed-route-chip:hover,
+  .feed-route-chip:focus-visible,
+  .topbar-menu[open] .feed-route-chip,
+  .status-menu[open] summary,
+  .status-menu summary:hover,
+  .status-menu summary:focus-visible {
+    background: rgba(140, 199, 239, 0.14);
+    border-color: rgba(140, 199, 239, 0.24);
+    color: #edf6ff;
+  }
+
+  :global(.feed-scan-status) {
+    max-width: 180px;
+    overflow: hidden;
+    padding: 0 8px;
+  }
+
+  .topbar-menu,
+  .status-menu {
+    position: relative;
+    min-width: 0;
+  }
+
+  .topbar-menu summary,
+  .status-menu summary {
+    list-style: none;
+    cursor: pointer;
+  }
+
+  .topbar-menu summary::-webkit-details-marker,
+  .status-menu summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .topbar-menu-panel,
+  .status-menu-panel {
+    position: absolute;
+    top: calc(100% + 4px);
+    display: grid;
+    gap: 12px;
+    padding: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(8, 11, 15, 0.9);
+    backdrop-filter: blur(22px) saturate(1.08);
+    box-shadow: 0 24px 58px rgba(0, 0, 0, 0.36);
+  }
+
+  .topbar-menu-panel {
+    left: 0;
+    width: min(360px, calc(100vw - 12px));
+    border-radius: 0 0 16px 0;
+  }
+
+  .feed-panel {
+    width: min(420px, calc(100vw - 12px));
+  }
+
+  .status-menu {
+    flex: 1 1 auto;
+  }
+
+  .status-menu summary {
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+    padding: 0 8px;
+  }
+
+  .status-menu-panel {
+    right: 0;
+    width: min(500px, 100vw);
+    grid-template-columns: minmax(0, 1fr) minmax(190px, 0.75fr);
+    border-radius: 0 0 0 16px;
+    border-top: 0;
+  }
+
+  .menu-section,
+  .status-panel-section {
+    min-width: 0;
+    display: grid;
+    gap: 8px;
+  }
+
+  .menu-label,
+  .status-panel-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: rgba(166, 178, 190, 0.86);
+    font-size: 0.64rem;
+    text-transform: uppercase;
+  }
+
+  .nav-links,
+  .feed-switcher,
+  .feed-action-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .nav-links a,
+  .feed-switcher a,
+  .feed-action-grid button {
+    min-height: 30px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(229, 241, 250, 0.86);
+    font-size: 0.74rem;
+    padding: 0 9px;
+  }
+
+  .feed-switcher a.active {
+    background: rgba(140, 199, 239, 0.16);
+    border-color: rgba(140, 199, 239, 0.3);
+    color: #edf6ff;
+  }
+
+  .feed-action-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .feed-action-grid button {
+    justify-content: flex-start;
+    color: #e8f2fa;
+    cursor: pointer;
+  }
+
+  .feed-action-grid button:disabled {
+    cursor: not-allowed;
+    opacity: 0.42;
+  }
+
+  .recipe-grid,
+  .queue-facts {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 7px 12px;
+    padding: 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(166, 178, 190, 0.9);
+    font-size: 0.72rem;
+  }
+
+  .recipe-grid strong,
+  .queue-facts strong {
+    min-width: 0;
+    overflow: hidden;
+    color: #edf5fc;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status-count,
+  .status-subreddit,
+  .status-chip,
+  .status-label {
+    padding: 0 8px;
+  }
+
+  .status-count {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .status-chip {
+    gap: 5px;
+    color: rgba(166, 178, 190, 0.92);
+  }
+
+  .lock-state[data-locked='true'] {
+    border-color: rgba(232, 189, 95, 0.26);
+    background: rgba(232, 189, 95, 0.12);
+    color: #f0d8a0;
+  }
+
+  .load-rail {
+    display: inline-flex;
+    align-items: center;
+    flex: 1 1 auto;
+    gap: 4px;
+    min-width: 34px;
+    overflow: hidden;
+  }
+
+  .load-chip {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: 8px;
+    height: 16px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.18);
+    overflow: hidden;
+  }
+
+  .load-chip[data-kind='gallery'] {
+    width: 12px;
+    border-radius: 4px;
+  }
+
+  .load-chip[data-kind='video'] {
+    width: 14px;
+    border-radius: 5px;
+  }
+
+  .load-chip.current {
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
+  }
+
+  .load-chip[data-status='seen'] {
+    background: rgba(255, 255, 255, 0.34);
+  }
+
+  .load-chip[data-status='loading'] {
+    background: rgba(214, 176, 103, 0.68);
+  }
+
+  .load-chip[data-status='ready'] {
+    background: rgba(106, 176, 222, 0.82);
+  }
+
+  .load-chip[data-status='error'] {
+    background: rgba(190, 101, 101, 0.82);
+  }
+
+  .load-chip::after {
+    content: '';
+    position: absolute;
+    inset: auto 0 0;
+    height: 3px;
+    background: transparent;
+  }
+
+  .load-chip.rating-up::after {
+    background: #71d488;
+  }
+
+  .load-chip.rating-down::after {
+    background: #de7e7e;
+  }
+
   .feed-state {
     min-height: 100vh;
     display: grid;
@@ -628,11 +1069,19 @@
     gap: 14px;
     color: #b7c5cf;
     text-align: center;
+    padding: 96px 24px 40px;
   }
+
+  .loading,
+  .empty {
+    font-size: clamp(1rem, 2vw, 1.2rem);
+    text-transform: uppercase;
+  }
+
   .feed-state button {
     justify-self: center;
     border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 6px;
+    border-radius: 10px;
     background: rgba(255, 255, 255, 0.08);
     color: #eef5fb;
     padding: 8px 12px;
@@ -642,7 +1091,7 @@
   }
   .vote-notice {
     position: fixed;
-    z-index: 22;
+    z-index: 42;
     left: 50%;
     bottom: 72px;
     display: flex;
@@ -651,7 +1100,7 @@
     max-width: min(360px, calc(100vw - 32px));
     min-height: 34px;
     padding: 8px 12px;
-    border-radius: 8px;
+    border-radius: 12px;
     border: 1px solid rgba(255, 255, 255, 0.14);
     background: rgba(8, 11, 14, 0.86);
     color: #eaf4fb;
@@ -677,27 +1126,54 @@
   }
   .feed-message {
     position: fixed;
-    z-index: 21;
-    top: 48px;
+    z-index: 41;
+    top: 46px;
     right: 10px;
     max-width: min(520px, calc(100vw - 20px));
     margin: 0;
     padding: 7px 10px;
-    border-radius: 6px;
+    border-radius: 10px;
     background: rgba(10, 14, 18, 0.82);
     border: 1px solid rgba(255, 255, 255, 0.1);
     color: #b7d7ea;
     font-size: 0.75rem;
   }
+
   @media (max-width: 760px) {
-    .feed-rail {
-      top: 48px;
-      overflow-x: auto;
+    .feed-topbar {
+      display: grid;
       align-items: stretch;
     }
-    .feed-summary {
-      margin-left: 0;
-      white-space: nowrap;
+
+    .feed-topbar-nav,
+    .feed-status {
+      width: 100%;
+      max-width: none;
+      overflow-x: auto;
+    }
+
+    .feed-status {
+      border-left: 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      justify-content: flex-start;
+    }
+
+    .status-menu-panel {
+      left: 0;
+      right: auto;
+      width: 100vw;
+      grid-template-columns: 1fr;
+      border-radius: 0 0 16px 0;
+    }
+
+    .topbar-menu-panel,
+    .feed-panel {
+      width: min(100vw, 380px);
+    }
+
+    .status-subreddit,
+    :global(.feed-scan-status) {
+      display: none;
     }
   }
 </style>
