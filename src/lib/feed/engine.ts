@@ -40,6 +40,7 @@ export interface FeedRefillResult {
   mediaPosts: number;
   newPosts: number;
   sources: string[];
+  scanTargets: string[];
 }
 
 function createRunId(recipeId: string): string {
@@ -183,12 +184,15 @@ export async function refillFeedSources(feedName: string): Promise<FeedRefillRes
     mediaPosts: 0,
     newPosts: 0,
     sources: [],
+    scanTargets: [],
   };
+  const scanTargets = new Set<string>();
 
   for (const plan of plans) {
     const sourceKey = getFeedSourceKey(plan);
     const sourceLabel = getFeedSourceLabel(plan);
     const stats = statsByKey.get(sourceKey);
+    scanTargets.add(plan.subreddit);
     const fetchResult = await fetchListing({
       path: getFeedSourcePath(plan),
       subreddits: [plan.subreddit],
@@ -215,7 +219,10 @@ export async function refillFeedSources(feedName: string): Promise<FeedRefillRes
     result.mediaPosts += persisted.mediaPosts.length;
     result.newPosts += persisted.newPostIds.length;
     result.sources.push(sourceLabel);
+    persisted.discoveredSubreddits.forEach((name) => scanTargets.add(name));
   }
+
+  result.scanTargets = [...scanTargets];
 
   await addQueueEvent({
     runId: createRunId(recipe.id),

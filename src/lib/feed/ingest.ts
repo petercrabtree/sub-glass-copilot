@@ -37,6 +37,7 @@ export interface PersistFetchedPostsResult {
   mediaPosts: PostRecord[];
   newPostIds: string[];
   duplicatePostIds: string[];
+  discoveredSubreddits: string[];
   sourceKey: string;
   sourceLabel: string;
 }
@@ -110,6 +111,7 @@ export async function persistFetchedPosts(
   const rawPostsReturned = context.rawPostsReturned ?? mediaPosts.length;
   const newPostIds: string[] = [];
   const duplicatePostIds: string[] = [];
+  const discoveredSubreddits = new Set<string>();
 
   await Promise.all(mediaPosts.map(async (post, listingPosition) => {
     const existing = await getPost(post.id);
@@ -123,6 +125,7 @@ export async function persistFetchedPosts(
     await upsertPost(routedPost);
     if (routedPost.media) await upsertMedia(routedPost.media);
     await ensureSubredditRecord(routedPost.subreddit, undefined, undefined, routedPost.isNsfw);
+    discoveredSubreddits.add(normalizeSourceSubreddit(routedPost.subreddit));
 
     await upsertPostSource({
       id: `${post.id}:${sourceKey}`,
@@ -150,6 +153,7 @@ export async function persistFetchedPosts(
     for (const link of links) {
       await upsertAdjacency(link);
       await ensureSubredditRecord(link.toSubreddit, `${link.source}:r/${routedPost.subreddit}`, link.evidence);
+      discoveredSubreddits.add(normalizeSourceSubreddit(link.toSubreddit));
     }
   }));
 
@@ -175,6 +179,7 @@ export async function persistFetchedPosts(
     mediaPosts,
     newPostIds,
     duplicatePostIds,
+    discoveredSubreddits: [...discoveredSubreddits],
     sourceKey,
     sourceLabel,
   };

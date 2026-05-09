@@ -419,7 +419,10 @@ class ProfileScanManager {
     if (!this.autoEnabled || this.paused) return;
 
     const openSlots = this.backgroundOpenSlots;
-    if (openSlots === 0) return;
+    if (openSlots === 0) {
+      if (!this.active) this.scheduleBackgroundRefill(BACKGROUND_REFILL_DELAY_MS);
+      return;
+    }
 
     const due = await this.getPrioritizedDueCandidates({
       limit: openSlots,
@@ -429,6 +432,9 @@ class ProfileScanManager {
     const names = due.map((candidate) => candidate.sub.name);
 
     this.enqueue(names, { mode: this.mode === 'idle' ? 'background' : this.mode });
+    if (names.length === 0 && !this.active && this.queue.length === 0) {
+      this.scheduleBackgroundRefill(BACKGROUND_REFILL_DELAY_MS);
+    }
   }
 
   async refreshPriorityPreview(limit = 20): Promise<void> {

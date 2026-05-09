@@ -13,6 +13,8 @@
   import { normalizeFeedName } from '$lib/feed/recipes';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
   import PostOverlay from '$lib/components/PostOverlay.svelte';
+  import ProfileScanStatus from '$lib/components/ProfileScanStatus.svelte';
+  import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import type {
     FeedRun,
     FeedRunItem,
@@ -25,6 +27,10 @@
   import type { MediaCacheRuntimeState, MediaCacheState } from '$lib/service-worker/media-cache';
   import type { VideoPreloadState } from '$lib/media/video-preload';
   import { getViewerActionForKey } from '$lib/viewer/keyboard';
+
+  const INITIAL_REFILL_POST_THRESHOLD = 8;
+  const AUTO_REFILL_AHEAD_THRESHOLD = 3;
+  const PROFILE_SCAN_POST_TARGET_LIMIT = 8;
 
   type LoadedMediaStatus = 'queued' | 'seen' | 'loading' | 'ready' | 'error';
   type LoadedVideoPreloadState = VideoPreloadState | 'skipped' | 'not-planned' | 'visible';
@@ -109,6 +115,36 @@
   );
   const currentWhyPost = $derived(buildWhyPostInfo(currentPost, currentRunItem));
 
+  function getAheadCount(statePosts = posts, index = currentIndex) {
+    return Math.max(0, statePosts.length - index - 1);
+  }
+
+  function getPostScanTargets(feedPosts: PostRecord[], startIndex = 0) {
+    return [...new Set(feedPosts
+      .slice(startIndex, startIndex + PROFILE_SCAN_POST_TARGET_LIMIT)
+      .map((post) => post.subreddit)
+      .filter(Boolean)
+    )];
+  }
+
+  function queueProfileScans(targets: string[]) {
+    if (targets.length === 0) return;
+
+    void profileScanManager.enqueueBackgroundTargets(targets).catch((scanError) => {
+      console.warn('Failed to queue feed profile scans', scanError);
+    });
+  }
+
+  async function refillSourceInventory(name: string) {
+    const refill = await refillFeedSources(name);
+    queueProfileScans(refill.scanTargets);
+    return refill;
+  }
+
+  function formatRefillMessage(refill: Awaited<ReturnType<typeof refillFeedSources>>) {
+    return `refill ${refill.ok}/${refill.attempted} sources · ${refill.mediaPosts} media · ${refill.newPosts} new`;
+  }
+
   $effect(() => {
     const nextFeedName = normalizeFeedName($page.params.feedname);
     if (nextFeedName === feedName && feedState) return;
@@ -132,13 +168,14 @@
     message = '';
     try {
       const initial = await buildFeedRun(name);
-      if (initial.posts.length < 8) {
+      if (initial.posts.length < INITIAL_REFILL_POST_THRESHOLD) {
         refilling = true;
-        const refill = await refillFeedSources(name);
-        message = `refill ${refill.ok}/${refill.attempted} sources · ${refill.mediaPosts} media`;
+        const refill = await refillSourceInventory(name);
+        message = formatRefillMessage(refill);
         applyState(await buildFeedRun(name, { refreshTail: true }));
       } else {
         applyState(initial);
+        queueProfileScans(getPostScanTargets(initial.posts));
       }
     } catch (loadError) {
       error = loadError instanceof Error ? loadError.message : String(loadError);
@@ -333,14 +370,27 @@
 
   async function refreshTail() {
     if (refreshingTail || !run) return;
+    let startedRefill = false;
     refreshingTail = true;
     message = '';
     try {
-      applyState(await buildFeedRun(feedName, { refreshTail: true, currentIndex }));
-      message = 'tail refreshed from local candidates';
+      const refreshed = await buildFeedRun(feedName, { refreshTail: true, currentIndex });
+      applyState(refreshed);
+      queueProfileScans(getPostScanTargets(refreshed.posts, refreshed.run.currentIndex));
+
+      if (getAheadCount(refreshed.posts, refreshed.run.currentIndex) <= AUTO_REFILL_AHEAD_THRESHOLD && !refilling) {
+        startedRefill = true;
+        refilling = true;
+        const refill = await refillSourceInventory(feedName);
+        applyState(await buildFeedRun(feedName, { refreshTail: true, currentIndex }));
+        message = `tail refreshed · ${formatRefillMessage(refill)}`;
+      } else {
+        message = 'tail refreshed from local candidates';
+      }
     } catch (refreshError) {
       error = refreshError instanceof Error ? refreshError.message : String(refreshError);
     } finally {
+      if (startedRefill) refilling = false;
       refreshingTail = false;
     }
   }
@@ -350,9 +400,9 @@
     refilling = true;
     message = '';
     try {
-      const refill = await refillFeedSources(feedName);
+      const refill = await refillSourceInventory(feedName);
       applyState(await buildFeedRun(feedName, { refreshTail: true, currentIndex }));
-      message = `refill ${refill.ok}/${refill.attempted} sources · ${refill.mediaPosts} media · ${refill.newPosts} new`;
+      message = formatRefillMessage(refill);
     } catch (refillError) {
       error = refillError instanceof Error ? refillError.message : String(refillError);
     } finally {
@@ -434,6 +484,7 @@
     <a href="/feed/fresh" class:active={feedName === 'fresh'}>fresh</a>
     <a href="/feed/explore" class:active={feedName === 'explore'}>explore</a>
     <span class="feed-summary">{queueHealth}</span>
+    <ProfileScanStatus class="feed-scan-status" />
     <button type="button" onclick={toggleLock} disabled={!run}>{run?.locked ? 'Unlock' : 'Lock'}</button>
     <button type="button" onclick={refreshTail} disabled={refreshingTail || !run || run.locked}>
       {refreshingTail ? 'Refreshing…' : 'Refresh tail'}
@@ -530,7 +581,8 @@
   }
   .feed-rail a,
   .feed-rail button,
-  .feed-summary {
+  .feed-summary,
+  :global(.feed-scan-status) {
     min-height: 26px;
     display: inline-flex;
     align-items: center;
@@ -560,6 +612,9 @@
   .feed-summary {
     color: #aebfcb;
     background: rgba(255, 255, 255, 0.035);
+  }
+  :global(.feed-scan-status) {
+    max-width: 180px;
   }
   .feed-viewer {
     width: 100vw;
