@@ -79,9 +79,14 @@ export interface RedditRateLimitState {
   tooFast?: boolean;
   status?: number;
   url?: string;
+  priority?: RedditRequestPriority;
   remaining?: number;
   resetMs?: number;
   used?: number;
+  observedAt?: number;
+  backgroundReserved?: boolean;
+  backgroundReserveRequests?: number;
+  backgroundReserveWaitMs?: number;
 }
 
 export interface RedditRateLimitHeaders {
@@ -103,6 +108,11 @@ const REQUEST_SPACING_MS: Record<RedditRequestPriority, number> = {
   interactive: 2500,
   background: 15 * 1000,
 };
+// Background consumers share Reddit's browser-visible budget, so keep a foreground slice unspent.
+const BACKGROUND_INTERACTIVE_RESERVE_PER_MINUTE = 10;
+const BACKGROUND_INTERACTIVE_RESERVE_FRACTION = 0.15;
+const BACKGROUND_INTERACTIVE_RESERVE_MAX_FRACTION = 0.5;
+const BACKGROUND_RESERVE_RESET_BUFFER_MS = 1000;
 const REQUEST_PRIORITY_RANK: Record<RedditRequestPriority, number> = {
   interactive: 0,
   background: 1,
@@ -323,7 +333,16 @@ function syncStoredRateLimitState(): void {
   const stored = readStoredRateLimitState();
   for (const priority of REQUEST_PRIORITIES) {
     const state = stored[priority];
-    if (!state?.until || state.until <= redditRateLimitedUntil[priority]) continue;
+    if (!state) continue;
+
+    if ((state.observedAt ?? 0) > (lastRateLimitState[priority].observedAt ?? 0)) {
+      lastRateLimitState[priority] = {
+        ...lastRateLimitState[priority],
+        ...state,
+      };
+    }
+
+    if ((!state.active && !state.tooFast) || !state.until || state.until <= redditRateLimitedUntil[priority]) continue;
 
     const remainingMs = Math.max(0, state.until - Date.now());
     if (remainingMs <= 0) continue;
@@ -350,6 +369,73 @@ function rememberRateLimitStateForPriority(
   return lastRateLimitState[priority];
 }
 
+function rememberRateLimitObservation(
+  priority: RedditRequestPriority,
+  rateLimit: RedditRateLimitHeaders,
+  url: string
+): boolean {
+  if (
+    rateLimit.remaining === undefined
+    && rateLimit.resetMs === undefined
+    && rateLimit.used === undefined
+    && rateLimit.retryAfterMs === undefined
+  ) {
+    return false;
+  }
+
+  lastRateLimitState[priority] = {
+    ...lastRateLimitState[priority],
+    active: false,
+    until: 0,
+    retryAfterMs: 0,
+    priority,
+    url,
+    remaining: rateLimit.remaining,
+    resetMs: rateLimit.resetMs,
+    used: rateLimit.used,
+    observedAt: Date.now(),
+  };
+  return true;
+}
+
+function getLatestRateLimitObservation(): RedditRateLimitState | undefined {
+  return REQUEST_PRIORITIES
+    .map((priority) => lastRateLimitState[priority])
+    .filter((state) => state.remaining !== undefined && state.resetMs !== undefined)
+    .sort((a, b) => (b.observedAt ?? 0) - (a.observedAt ?? 0))[0];
+}
+
+function getBackgroundReserveRequests(state: RedditRateLimitState): number | undefined {
+  if (state.remaining === undefined || state.resetMs === undefined || state.resetMs <= 0) return undefined;
+
+  const windowMinutes = Math.max(1 / 60, state.resetMs / 60_000);
+  const minuteReserve = Math.ceil(windowMinutes * BACKGROUND_INTERACTIVE_RESERVE_PER_MINUTE);
+  const inferredLimit = state.used === undefined ? undefined : Math.max(0, state.remaining + state.used);
+  const fractionalReserve = inferredLimit === undefined
+    ? 0
+    : Math.ceil(inferredLimit * BACKGROUND_INTERACTIVE_RESERVE_FRACTION);
+  let reserve = Math.max(1, minuteReserve, fractionalReserve);
+
+  if (inferredLimit !== undefined && inferredLimit > 0) {
+    reserve = Math.min(
+      reserve,
+      Math.max(1, Math.floor(inferredLimit * BACKGROUND_INTERACTIVE_RESERVE_MAX_FRACTION))
+    );
+  }
+
+  return reserve;
+}
+
+function getBackgroundReserveWaitMs(now = Date.now()): number {
+  const state = getLatestRateLimitObservation();
+  const reserve = state ? getBackgroundReserveRequests(state) : undefined;
+  if (!state || reserve === undefined || state.remaining === undefined || state.resetMs === undefined) return 0;
+  if (Math.floor(state.remaining) > reserve) return 0;
+
+  const observedAt = state.observedAt ?? now;
+  return Math.max(0, observedAt + state.resetMs - now + BACKGROUND_RESERVE_RESET_BUFFER_MS);
+}
+
 function rememberRateLimitResponse(
   res: Response,
   url: string,
@@ -357,6 +443,8 @@ function rememberRateLimitResponse(
   priority: RedditRequestPriority,
   attempt = 0
 ): RedditRateLimitState | undefined {
+  const recordedObservation = rememberRateLimitObservation(priority, rateLimit, url);
+
   const hasTooFastStatus = TOO_FAST_HTTP_STATUSES.has(res.status);
   const isBudgetExhausted = rateLimit.remaining !== undefined
     && rateLimit.remaining <= 0
@@ -368,6 +456,13 @@ function rememberRateLimitResponse(
       const pacedDelayMs = Math.ceil(rateLimit.resetMs / Math.max(1, Math.floor(rateLimit.remaining)));
       nextRedditRequestAt[priority] = Math.max(nextRedditRequestAt[priority], Date.now() + pacedDelayMs);
     }
+    if (priority === 'background') {
+      const reserveWaitMs = getBackgroundReserveWaitMs();
+      if (reserveWaitMs > 0) {
+        nextRedditRequestAt.background = Math.max(nextRedditRequestAt.background, Date.now() + reserveWaitMs);
+      }
+    }
+    if (recordedObservation) writeStoredRateLimitState();
     return undefined;
   }
 
@@ -383,9 +478,11 @@ function rememberRateLimitResponse(
     tooFast: hasTooFastStatus || rateLimit.retryAfterMs !== undefined,
     status: res.status,
     url,
+    priority,
     remaining: rateLimit.remaining,
     resetMs: rateLimit.resetMs,
     used: rateLimit.used,
+    observedAt: Date.now(),
   };
   for (const affectedPriority of REQUEST_PRIORITIES) {
     rememberRateLimitStateForPriority(affectedPriority, sharedState);
@@ -432,7 +529,8 @@ function getRedditQueueDelayMs(priority: RedditRequestPriority): number {
     };
   }
   const spacingWaitMs = Math.max(0, nextRedditRequestAt[priority] - Date.now());
-  return Math.max(cooldownWaitMs, spacingWaitMs);
+  const reserveWaitMs = priority === 'background' ? getBackgroundReserveWaitMs() : 0;
+  return Math.max(cooldownWaitMs, spacingWaitMs, reserveWaitMs);
 }
 
 function pickNextQueuedRequest(): RedditQueuedRequest | undefined {
@@ -523,12 +621,20 @@ export function readRedditRateLimitState(): RedditRateLimitState {
       selectedRemainingMs = remainingMs;
     }
   }
+  const latestObservation = getLatestRateLimitObservation();
+  const backgroundReserveWaitMs = getBackgroundReserveWaitMs();
+  const backgroundReserveRequests = latestObservation ? getBackgroundReserveRequests(latestObservation) : undefined;
 
   if (selectedRemainingMs <= 0) {
+    const state = latestObservation ?? lastRateLimitState[selectedPriority];
     return {
-      ...lastRateLimitState[selectedPriority],
+      ...state,
       active: false,
+      until: 0,
       retryAfterMs: 0,
+      backgroundReserved: backgroundReserveWaitMs > 0,
+      backgroundReserveRequests,
+      backgroundReserveWaitMs,
     };
   }
 
@@ -537,6 +643,9 @@ export function readRedditRateLimitState(): RedditRateLimitState {
     active: true,
     until: redditRateLimitedUntil[selectedPriority],
     retryAfterMs: selectedRemainingMs,
+    backgroundReserved: backgroundReserveWaitMs > 0,
+    backgroundReserveRequests,
+    backgroundReserveWaitMs,
   };
 }
 

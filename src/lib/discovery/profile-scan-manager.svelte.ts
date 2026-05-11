@@ -53,6 +53,10 @@ export interface ProfileScanBudgetSnapshot {
   backgroundTarget: number;
   backgroundOpenSlots: number;
   rateLimitRemainingMs: number;
+  rateLimitRemainingRequests?: number;
+  rateLimitResetMs?: number;
+  backgroundReserveRequests?: number;
+  backgroundReserveWaitMs?: number;
   lockedElsewhere: boolean;
   scannedCount: number;
   totalCount: number;
@@ -192,6 +196,7 @@ class ProfileScanManager {
   }
 
   get budgetSnapshot(): ProfileScanBudgetSnapshot {
+    const rateLimit = this.rateLimitState;
     return {
       mode: this.mode,
       autoEnabled: this.autoEnabled,
@@ -201,7 +206,11 @@ class ProfileScanManager {
       currentName: this.currentName,
       backgroundTarget: BACKGROUND_QUEUE_TARGET,
       backgroundOpenSlots: this.backgroundOpenSlots,
-      rateLimitRemainingMs: this.rateLimitRemainingMs,
+      rateLimitRemainingMs: rateLimit.active ? rateLimit.retryAfterMs : 0,
+      rateLimitRemainingRequests: rateLimit.remaining,
+      rateLimitResetMs: rateLimit.resetMs,
+      backgroundReserveRequests: rateLimit.backgroundReserveRequests,
+      backgroundReserveWaitMs: rateLimit.backgroundReserveWaitMs,
       lockedElsewhere: this.lockedElsewhere,
       scannedCount: this.scannedCount,
       totalCount: this.totalCount,
@@ -222,9 +231,13 @@ class ProfileScanManager {
     }));
   }
 
-  get rateLimitRemainingMs(): number {
+  get rateLimitState() {
     void this.now;
-    const rateLimit = readRedditRateLimitState();
+    return readRedditRateLimitState();
+  }
+
+  get rateLimitRemainingMs(): number {
+    const rateLimit = this.rateLimitState;
     return rateLimit.active ? rateLimit.retryAfterMs : 0;
   }
 

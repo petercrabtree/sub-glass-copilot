@@ -325,6 +325,26 @@
     return `${Math.ceil(seconds / 60)}m`;
   }
 
+  function formatRequestCount(value: number | undefined) {
+    if (value === undefined) return 'unseen';
+    if (value < 10 && !Number.isInteger(value)) return value.toFixed(1);
+    return String(Math.floor(value));
+  }
+
+  function formatRateBudget(remaining: number | undefined, resetMs: number | undefined) {
+    if (remaining === undefined) return 'unseen';
+    return resetMs && resetMs > 0
+      ? `${formatRequestCount(remaining)} left / ${formatWait(resetMs)}`
+      : `${formatRequestCount(remaining)} left`;
+  }
+
+  function formatReserve(requests: number | undefined, waitMs: number | undefined) {
+    if (requests === undefined) return 'unseen';
+    return waitMs && waitMs > 0
+      ? `${formatRequestCount(requests)} held (${formatWait(waitMs)})`
+      : `${formatRequestCount(requests)} held`;
+  }
+
   function formatPriorityScore(score: number | undefined) {
     return score === undefined ? '—' : score.toFixed(1);
   }
@@ -586,6 +606,10 @@
                 <strong>{profileScanManager.budgetSnapshot.backgroundOpenSlots}</strong>
                 <span>rate wait</span>
                 <strong>{formatWait(profileScanManager.budgetSnapshot.rateLimitRemainingMs)}</strong>
+                <span>reddit budget</span>
+                <strong>{formatRateBudget(profileScanManager.budgetSnapshot.rateLimitRemainingRequests, profileScanManager.budgetSnapshot.rateLimitResetMs)}</strong>
+                <span>foreground reserve</span>
+                <strong>{formatReserve(profileScanManager.budgetSnapshot.backgroundReserveRequests, profileScanManager.budgetSnapshot.backgroundReserveWaitMs)}</strong>
                 <span>lock</span>
                 <strong>{profileScanManager.budgetSnapshot.lockedElsewhere ? 'another tab' : 'local'}</strong>
               </div>
