@@ -184,6 +184,8 @@ export interface FeedRecipe {
   nsfwMode: 'yes' | 'no' | 'only';
   listingSort: RedditListingSort;
   listingTime: RedditListingTime;
+  manualSourceSubreddits?: string[];
+  excludedSourceSubreddits?: string[];
   sourceCount: number;
   targetQueueSize: number;
   committedAheadCount: number;

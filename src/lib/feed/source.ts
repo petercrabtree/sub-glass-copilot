@@ -15,6 +15,22 @@ export function normalizeSourceSubreddit(name: string): string {
   return name.trim().replace(/^\/?r\//i, '').toLowerCase();
 }
 
+export function isValidFeedSourceSubredditName(name: string): boolean {
+  return /^[a-z0-9_]{2,21}$/i.test(normalizeSourceSubreddit(name));
+}
+
+export function normalizeFeedSourceSubredditList(names: readonly string[] | undefined): string[] {
+  const normalized = new Set<string>();
+
+  for (const name of names ?? []) {
+    const subreddit = normalizeSourceSubreddit(name);
+    if (!isValidFeedSourceSubredditName(subreddit) || subreddit === 'all') continue;
+    normalized.add(subreddit);
+  }
+
+  return [...normalized];
+}
+
 export function getFeedSourceKey(spec: FeedSourceSpec): string {
   const subreddit = normalizeSourceSubreddit(spec.subreddit);
   const sort = normalizeRedditListingSort(spec.listingSort, 'hot');

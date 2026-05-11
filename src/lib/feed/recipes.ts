@@ -7,6 +7,7 @@ import {
   normalizeRedditListingTime,
   redditListingSortUsesTime,
 } from '$lib/reddit/listing';
+import { normalizeFeedSourceSubredditList } from '$lib/feed/source';
 import type { FeedRecipe, FeedRecipeSourceMode, RedditListingSort, RedditListingTime } from '$lib/types';
 
 const FEED_NAME_PATTERN = /^[a-z0-9_-]{1,40}$/i;
@@ -121,6 +122,10 @@ function normalizeSourceMode(mode: FeedRecipeSourceMode): FeedRecipeSourceMode {
 export function normalizeFeedRecipe(recipe: FeedRecipe): FeedRecipe {
   const listingSort = normalizeSort(recipe.listingSort);
   const listingTime = normalizeTime(listingSort, recipe.listingTime);
+  const manualSourceSubreddits = normalizeFeedSourceSubredditList(recipe.manualSourceSubreddits);
+  const manualSourceSet = new Set(manualSourceSubreddits);
+  const excludedSourceSubreddits = normalizeFeedSourceSubredditList(recipe.excludedSourceSubreddits)
+    .filter((name) => !manualSourceSet.has(name));
 
   return {
     ...recipe,
@@ -128,6 +133,8 @@ export function normalizeFeedRecipe(recipe: FeedRecipe): FeedRecipe {
     sourceMode: normalizeSourceMode(recipe.sourceMode),
     listingSort,
     listingTime,
+    manualSourceSubreddits,
+    excludedSourceSubreddits,
     sourceCount: clampInt(recipe.sourceCount, 1, 24),
     targetQueueSize: clampInt(recipe.targetQueueSize, 8, 120),
     committedAheadCount: clampInt(recipe.committedAheadCount, 1, 12),

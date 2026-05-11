@@ -1,17 +1,47 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
-  import { getPost, markPostSeen, setPostRating, updateSubredditRating, addEvent } from '$lib/db/store';
-	  import {
-	    buildFeedRun,
-	    loadFeedRun,
-	    refillFeedSources,
+  import {
+    addEvent,
+    getAllAdjacency,
+    getAllSourceStats,
+    getAllSubreddits,
+    getPost,
+    getSubreddit,
+    isSubredditUnavailable,
+    markPostSeen,
+    markSubredditAvailable,
+    markSubredditUnavailable,
+    setPostRating,
+    setSubredditMuted,
+    updateSubredditRating,
+    upsertFeedRecipe,
+    upsertSubreddit,
+  } from '$lib/db/store';
+  import {
+    buildFeedRun,
+    loadFeedRun,
+    refillFeedSources,
     setFeedRunIndex,
     setFeedRunLocked,
-	    type RefillFeedSourcesOptions,
-	    type FeedRunState,
-	  } from '$lib/feed/engine';
-	  import { parseFeedRouteSpec, type FeedRouteSpec } from '$lib/feed/routes';
+    type RefillFeedSourcesOptions,
+    type FeedRunState,
+  } from '$lib/feed/engine';
+  import { normalizeFeedRecipe } from '$lib/feed/recipes';
+  import { parseFeedRouteSpec, type FeedRouteSpec } from '$lib/feed/routes';
+  import {
+    getFeedSourceKey,
+    getFeedSourceLabel,
+    getFeedSourceRoutePath,
+    isFeedSourceAvailable,
+    isValidFeedSourceSubredditName,
+    normalizeFeedSourceSubredditList,
+    normalizeSourceSubreddit,
+  } from '$lib/feed/source';
+  import FeedSourceManager, {
+    type FeedSourceRow,
+    type FeedSourceSuggestion,
+  } from '$lib/components/FeedSourceManager.svelte';
   import FeedQueueStatus from '$lib/components/FeedQueueStatus.svelte';
   import FeedRouteMenu from '$lib/components/FeedRouteMenu.svelte';
   import MediaViewer from '$lib/components/MediaViewer.svelte';
@@ -21,6 +51,8 @@
   import ViewerTopRail from '$lib/components/ViewerTopRail.svelte';
   import { profileScanManager } from '$lib/discovery/profile-scan-manager.svelte.js';
   import type {
+    AdjacencyLink,
+    FeedRecipe,
     FeedRun,
     FeedRunItem,
     FeedScoreDetail,
@@ -28,6 +60,8 @@
     MediaKind,
     PostRecord,
     SignalEventType,
+    SourceStats,
+    SubredditRecord,
   } from '$lib/types';
   import type { MediaCacheRuntimeState, MediaCacheState } from '$lib/service-worker/media-cache';
   import type { VideoPreloadState } from '$lib/media/video-preload';
@@ -77,26 +111,31 @@
     tone: 'positive' | 'negative' | 'muted';
   };
 
-	  let feedSpec = $state<FeedRouteSpec>(parseFeedRouteSpec(undefined));
-	  let feedState = $state<FeedRunState | null>(null);
+  let feedSpec = $state<FeedRouteSpec>(parseFeedRouteSpec(undefined));
+  let feedState = $state<FeedRunState | null>(null);
   let posts = $state<PostRecord[]>([]);
   let items = $state<FeedRunItem[]>([]);
   let run = $state<FeedRun | null>(null);
+  let subreddits = $state<SubredditRecord[]>([]);
+  let sourceStats = $state<SourceStats[]>([]);
+  let adjacency = $state<AdjacencyLink[]>([]);
   let currentIndex = $state(0);
   let galleryIndex = $state(0);
   let loading = $state(true);
   let refilling = $state(false);
   let refreshingTail = $state(false);
-	  let error = $state('');
-	  let message = $state('');
-	  let voteNotice = $state<VoteNotice | null>(null);
-	  let voteNoticeTimer: ReturnType<typeof setTimeout> | undefined;
-	  let currentMediaLoadState = $state<'loading' | 'ready' | 'error'>('loading');
-	  let loadingRouteKey = $state('');
+  let sourceActionBusy = $state('');
+  let sourcePanelMessage = $state('');
+  let error = $state('');
+  let message = $state('');
+  let voteNotice = $state<VoteNotice | null>(null);
+  let voteNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let currentMediaLoadState = $state<'loading' | 'ready' | 'error'>('loading');
+  let loadingRouteKey = $state('');
 
-	  const feedName = $derived(feedSpec.feedName);
-	  const sourceSummary = $derived(feedSpec.sourceSummary);
-	  const currentPost = $derived(posts[currentIndex]);
+  const feedName = $derived(feedSpec.feedName);
+  const sourceSummary = $derived(feedSpec.sourceSummary);
+  const currentPost = $derived(posts[currentIndex]);
   const currentRunItem = $derived(items[currentIndex]);
   const currentMedia = $derived(currentPost?.media);
   const currentItem = $derived(currentMedia?.items?.[galleryIndex] ?? currentMedia?.items?.[0]);
@@ -104,6 +143,8 @@
   const imageCacheMode = $derived<MediaCacheRuntimeState>('inactive');
   const queueHealth = $derived(formatQueueHealth());
   const feedStatus = $derived(error ? 'error' : loading ? 'loading' : posts.length > 0 ? 'ready' : 'empty');
+  const feedSourceRows = $derived(buildFeedSourceRows());
+  const feedSourceSuggestions = $derived(buildFeedSourceSuggestions());
   const loadedMediaStates = $derived<LoadedMediaQueueItem[]>(
     posts.map((post, index) => {
       const item = items[index];
@@ -129,6 +170,185 @@
   );
   const currentWhyPost = $derived(buildWhyPostInfo(currentPost, currentRunItem));
 
+  function getManualSourceNames(recipe = feedState?.recipe): string[] {
+    return normalizeFeedSourceSubredditList(recipe?.manualSourceSubreddits);
+  }
+
+  function getExcludedSourceNames(recipe = feedState?.recipe): string[] {
+    return normalizeFeedSourceSubredditList(recipe?.excludedSourceSubreddits);
+  }
+
+  function isSourceNsfwCompatible(sub: SubredditRecord | undefined, recipe: FeedRecipe): boolean {
+    if (!sub) return true;
+    if (recipe.nsfwMode === 'yes') return true;
+    if (recipe.nsfwMode === 'no') return sub.isNsfw !== true;
+    return sub.isNsfw !== false;
+  }
+
+  function sourceStatsMatchesRoute(stats: SourceStats): boolean {
+    return stats.sourceKey === getFeedSourceKey({
+      subreddit: stats.subreddit,
+      listingSort: feedSpec.listingSort,
+      listingTime: feedSpec.listingTime,
+    });
+  }
+
+  function buildFeedSourceRows(): FeedSourceRow[] {
+    const recipe = feedState?.recipe;
+    const manualSourceSet = new Set(getManualSourceNames(recipe));
+    const excludedSourceSet = new Set(getExcludedSourceNames(recipe));
+    const subredditByName = new Map(subreddits.map((sub) => [normalizeSourceSubreddit(sub.name), sub]));
+    const statsBySource = new Map(sourceStats.map((stats) => [stats.sourceKey, stats]));
+    const rows = new Map<string, FeedSourceRow>();
+    const currentSubreddit = currentPost ? normalizeSourceSubreddit(currentPost.subreddit) : '';
+
+    function ensureRow(subredditInput: string, queuedCount = 0, sourceLabel?: string): void {
+      const subreddit = normalizeSourceSubreddit(subredditInput);
+      if (!isValidFeedSourceSubredditName(subreddit) || subreddit === 'all') return;
+      const sourceKey = getFeedSourceKey({
+        subreddit,
+        listingSort: feedSpec.listingSort,
+        listingTime: feedSpec.listingTime,
+      });
+      const stats = statsBySource.get(sourceKey);
+      const sub = subredditByName.get(subreddit);
+      const existing = rows.get(subreddit);
+      rows.set(subreddit, {
+        subreddit,
+        sourceKey,
+        sourceLabel: sourceLabel ?? stats?.sourceLabel ?? getFeedSourceLabel({
+          subreddit,
+          listingSort: feedSpec.listingSort,
+          listingTime: feedSpec.listingTime,
+        }),
+        routePath: getFeedSourceRoutePath({
+          subreddit,
+          listingSort: feedSpec.listingSort,
+          listingTime: feedSpec.listingTime,
+        }),
+        queuedCount: (existing?.queuedCount ?? 0) + queuedCount,
+        manual: manualSourceSet.has(subreddit),
+        excluded: excludedSourceSet.has(subreddit),
+        muted: Boolean(sub?.isMuted || sub?.discoveryStatus === 'muted'),
+        unavailableStatus: sub && isSubredditUnavailable(sub) ? sub.availabilityStatus : undefined,
+        localRating: sub?.localRating ?? 0,
+        lastFetchedAt: stats?.lastFetchedAt,
+        cooldownUntil: stats?.cooldownUntil,
+        lastError: stats?.lastError,
+        fetchCount: stats?.fetchCount,
+        mediaPostsReturned: stats?.mediaPostsReturned,
+        newPostsReturned: stats?.newPostsReturned,
+        duplicatePostsReturned: stats?.duplicatePostsReturned,
+        current: existing?.current || subreddit === currentSubreddit,
+      });
+    }
+
+    for (const item of items) {
+      ensureRow(item.subreddit, 1, item.sourceLabel);
+    }
+
+    for (const subreddit of manualSourceSet) {
+      ensureRow(subreddit);
+    }
+
+    sourceStats
+      .filter(sourceStatsMatchesRoute)
+      .sort((a, b) => (b.lastFetchedAt ?? 0) - (a.lastFetchedAt ?? 0))
+      .slice(0, 24)
+      .forEach((stats) => ensureRow(stats.subreddit, 0, stats.sourceLabel));
+
+    for (const subreddit of excludedSourceSet) {
+      ensureRow(subreddit);
+    }
+
+    function sourceRank(row: FeedSourceRow): number {
+      if (row.current) return 0;
+      if (row.unavailableStatus || row.muted || row.excluded) return 5;
+      if (row.manual) return 1;
+      if (row.queuedCount > 0) return 2;
+      if (row.lastFetchedAt) return 3;
+      return 4;
+    }
+
+    return [...rows.values()].sort((a, b) =>
+      sourceRank(a) - sourceRank(b) ||
+      b.queuedCount - a.queuedCount ||
+      (b.lastFetchedAt ?? 0) - (a.lastFetchedAt ?? 0) ||
+      a.subreddit.localeCompare(b.subreddit)
+    );
+  }
+
+  function buildFeedSourceSuggestions(): FeedSourceSuggestion[] {
+    const recipe = feedState?.recipe;
+    if (!recipe) return [];
+    const activeRecipe = recipe;
+
+    const used = new Set(feedSourceRows.map((row) => row.subreddit));
+    const seen = new Set<string>();
+    const subredditByName = new Map(subreddits.map((sub) => [normalizeSourceSubreddit(sub.name), sub]));
+    const suggestions: FeedSourceSuggestion[] = [];
+
+    function addSuggestion(subredditInput: string, reason: string, score: number): void {
+      const subreddit = normalizeSourceSubreddit(subredditInput);
+      const sub = subredditByName.get(subreddit);
+      if (!sub || seen.has(subreddit) || used.has(subreddit)) return;
+      if (!isFeedSourceAvailable(sub) || !isSourceNsfwCompatible(sub, activeRecipe)) return;
+      seen.add(subreddit);
+      suggestions.push({
+        subreddit,
+        sourceLabel: getFeedSourceLabel({
+          subreddit,
+          listingSort: feedSpec.listingSort,
+          listingTime: feedSpec.listingTime,
+        }),
+        reason,
+        score,
+      });
+    }
+
+    subreddits
+      .filter((sub) => (sub.localRating ?? 0) > 0)
+      .sort((a, b) => (b.localRating ?? 0) - (a.localRating ?? 0))
+      .slice(0, 12)
+      .forEach((sub) => addSuggestion(
+        sub.name,
+        `rating +${Number((sub.localRating ?? 0).toFixed(2))}`,
+        8 + (sub.localRating ?? 0)
+      ));
+
+    const seedSources = new Set([
+      ...feedSourceRows.filter((row) => !row.excluded && !row.muted && !row.unavailableStatus).map((row) => row.subreddit),
+      ...subreddits.filter((sub) => (sub.localRating ?? 0) > 0).slice(0, 8).map((sub) => sub.name),
+    ]);
+    adjacency
+      .filter((link) => seedSources.has(normalizeSourceSubreddit(link.fromSubreddit)))
+      .sort((a, b) => (b.weight ?? b.count ?? 1) - (a.weight ?? a.count ?? 1))
+      .slice(0, 24)
+      .forEach((link) => addSuggestion(
+        link.toSubreddit,
+        `linked from r/${link.fromSubreddit}`,
+        4 + (link.weight ?? link.count ?? 1)
+      ));
+
+    sourceStats
+      .filter(sourceStatsMatchesRoute)
+      .sort((a, b) => (b.mediaPostsReturned / Math.max(1, b.fetchCount)) - (a.mediaPostsReturned / Math.max(1, a.fetchCount)))
+      .slice(0, 16)
+      .forEach((stats) => addSuggestion(
+        stats.subreddit,
+        `${stats.mediaPostsReturned} media fetched`,
+        2 + stats.mediaPostsReturned / Math.max(1, stats.fetchCount)
+      ));
+
+    subreddits
+      .filter((sub) => (sub.localRating ?? 0) === 0 && sub.discoveryStatus === 'discovered')
+      .sort((a, b) => (b.firstSeenAt ?? 0) - (a.firstSeenAt ?? 0))
+      .slice(0, 16)
+      .forEach((sub) => addSuggestion(sub.name, 'new local source', 1));
+
+    return suggestions.sort((a, b) => b.score - a.score).slice(0, 10);
+  }
+
   function getAheadCount(statePosts = posts, index = currentIndex) {
     return Math.max(0, statePosts.length - index - 1);
   }
@@ -149,11 +369,23 @@
     });
   }
 
-	  async function refillSourceInventory(spec: FeedRouteSpec, options: RefillFeedSourcesOptions = {}) {
-	    const refill = await refillFeedSources(spec, options);
-	    queueProfileScans(refill.scanTargets);
-	    return refill;
-	  }
+  async function loadSourceCatalog() {
+    const [nextSubreddits, nextSourceStats, nextAdjacency] = await Promise.all([
+      getAllSubreddits(),
+      getAllSourceStats(),
+      getAllAdjacency(),
+    ]);
+    subreddits = nextSubreddits;
+    sourceStats = nextSourceStats;
+    adjacency = nextAdjacency;
+  }
+
+  async function refillSourceInventory(spec: FeedRouteSpec, options: RefillFeedSourcesOptions = {}) {
+    const refill = await refillFeedSources(spec, options);
+    queueProfileScans(refill.scanTargets);
+    await loadSourceCatalog();
+    return refill;
+  }
 
   function formatRefillMessage(refill: Awaited<ReturnType<typeof refillFeedSources>>) {
     const requestSummary = refill.cacheHits > 0
@@ -182,6 +414,7 @@
     currentIndex = Math.min(nextState.run.currentIndex, Math.max(0, nextState.posts.length - 1));
     galleryIndex = 0;
     resetMediaState();
+    void loadSourceCatalog();
   }
 
 	  async function loadFeed(spec: FeedRouteSpec) {
@@ -453,6 +686,164 @@
     }
   }
 
+  async function writeRecipeSourceLists(
+    recipe: FeedRecipe,
+    manualSourceSubreddits: string[],
+    excludedSourceSubreddits: string[],
+    sourceCount = recipe.sourceCount
+  ): Promise<FeedRecipe> {
+    const nextRecipe = normalizeFeedRecipe({
+      ...recipe,
+      manualSourceSubreddits,
+      excludedSourceSubreddits,
+      sourceCount,
+      updatedAt: Date.now(),
+    });
+    await upsertFeedRecipe(nextRecipe);
+    if (feedState) {
+      feedState = {
+        ...feedState,
+        recipe: nextRecipe,
+      };
+    }
+    return nextRecipe;
+  }
+
+  async function rebuildAfterSourceChange(successMessage: string) {
+    if (run?.locked) {
+      sourcePanelMessage = `${successMessage} · queue locked`;
+      await loadSourceCatalog();
+      return;
+    }
+
+    const rebuilt = await buildFeedRun(feedSpec, { refreshTail: true, currentIndex });
+    applyState(rebuilt);
+    sourcePanelMessage = successMessage;
+  }
+
+  async function addManualSource(source: string) {
+    const recipe = feedState?.recipe;
+    const subreddit = normalizeSourceSubreddit(source);
+    if (!recipe) return;
+    if (!isValidFeedSourceSubredditName(subreddit) || subreddit === 'all') {
+      sourcePanelMessage = 'invalid subreddit';
+      return;
+    }
+
+    sourceActionBusy = `add:${subreddit}`;
+    sourcePanelMessage = '';
+    refilling = true;
+    try {
+      const existing = await getSubreddit(subreddit);
+      const now = Date.now();
+      const wasUnavailable = existing ? isSubredditUnavailable(existing) : false;
+      await upsertSubreddit({
+        ...(existing ?? {
+          name: subreddit,
+          prefixedName: `r/${subreddit}`,
+          firstSeenAt: now,
+          localRating: 0,
+        }),
+        name: subreddit,
+        prefixedName: `r/${subreddit}`,
+        isMuted: false,
+        isNsfw: existing?.isNsfw ?? (recipe.nsfwMode === 'only' ? true : undefined),
+        discoveryStatus: existing?.profileFetchedAt ? 'verified' : 'discovered',
+        discoveredVia: existing?.discoveredVia ?? 'feed-manual',
+        discoveryReason: existing?.discoveryReason ?? 'manual feed source',
+        availabilityStatus: wasUnavailable ? 'available' : existing?.availabilityStatus,
+        availabilityCheckedAt: wasUnavailable ? now : existing?.availabilityCheckedAt,
+        availabilityReason: wasUnavailable ? undefined : existing?.availabilityReason,
+        availabilityDetail: wasUnavailable ? undefined : existing?.availabilityDetail,
+        unavailableSince: wasUnavailable ? undefined : existing?.unavailableSince,
+      });
+
+      const nextManual = normalizeFeedSourceSubredditList([...getManualSourceNames(recipe), subreddit]);
+      const nextExcluded = getExcludedSourceNames(recipe).filter((name) => name !== subreddit);
+      const nextRecipe = await writeRecipeSourceLists(
+        recipe,
+        nextManual,
+        nextExcluded,
+        Math.max(recipe.sourceCount, nextManual.length)
+      );
+      const refill = await refillSourceInventory(feedSpec, { force: true, onlySubreddits: [subreddit] });
+      if (feedState) feedState = { ...feedState, recipe: nextRecipe };
+      await rebuildAfterSourceChange(`added r/${subreddit} · ${formatRefillMessage(refill)}`);
+    } catch (sourceError) {
+      sourcePanelMessage = sourceError instanceof Error ? sourceError.message : String(sourceError);
+    } finally {
+      refilling = false;
+      sourceActionBusy = '';
+    }
+  }
+
+  async function addSuggestedSource(suggestion: FeedSourceSuggestion) {
+    await addManualSource(suggestion.subreddit);
+  }
+
+  async function removeFeedSource(row: FeedSourceRow) {
+    const recipe = feedState?.recipe;
+    if (!recipe) return;
+    sourceActionBusy = `remove:${row.subreddit}`;
+    sourcePanelMessage = '';
+    try {
+      const nextManual = getManualSourceNames(recipe).filter((name) => name !== row.subreddit);
+      const nextExcluded = normalizeFeedSourceSubredditList([...getExcludedSourceNames(recipe), row.subreddit]);
+      await writeRecipeSourceLists(recipe, nextManual, nextExcluded);
+      await rebuildAfterSourceChange(`removed r/${row.subreddit}`);
+    } catch (sourceError) {
+      sourcePanelMessage = sourceError instanceof Error ? sourceError.message : String(sourceError);
+    } finally {
+      sourceActionBusy = '';
+    }
+  }
+
+  async function banFeedSource(row: FeedSourceRow) {
+    if (!window.confirm(`Ban r/${row.subreddit} from local feeds?`)) return;
+    const recipe = feedState?.recipe;
+    if (!recipe) return;
+    sourceActionBusy = `ban:${row.subreddit}`;
+    sourcePanelMessage = '';
+    try {
+      await markSubredditUnavailable(
+        row.subreddit,
+        'banned',
+        'Manually banned from feed source manager',
+        `Banned from ${feedName}/${sourceSummary}`
+      );
+      const nextManual = getManualSourceNames(recipe).filter((name) => name !== row.subreddit);
+      const nextExcluded = normalizeFeedSourceSubredditList([...getExcludedSourceNames(recipe), row.subreddit]);
+      await writeRecipeSourceLists(recipe, nextManual, nextExcluded);
+      await rebuildAfterSourceChange(`banned r/${row.subreddit}`);
+    } catch (sourceError) {
+      sourcePanelMessage = sourceError instanceof Error ? sourceError.message : String(sourceError);
+    } finally {
+      sourceActionBusy = '';
+    }
+  }
+
+  async function restoreFeedSource(row: FeedSourceRow) {
+    const recipe = feedState?.recipe;
+    if (!recipe) return;
+    sourceActionBusy = `restore:${row.subreddit}`;
+    sourcePanelMessage = '';
+    try {
+      if (row.muted) {
+        await setSubredditMuted(row.subreddit, false);
+      }
+      if (row.unavailableStatus) {
+        await markSubredditAvailable(row.subreddit);
+      }
+      const nextExcluded = getExcludedSourceNames(recipe).filter((name) => name !== row.subreddit);
+      await writeRecipeSourceLists(recipe, getManualSourceNames(recipe), nextExcluded);
+      await rebuildAfterSourceChange(`restored r/${row.subreddit}`);
+    } catch (sourceError) {
+      sourcePanelMessage = sourceError instanceof Error ? sourceError.message : String(sourceError);
+    } finally {
+      sourceActionBusy = '';
+    }
+  }
+
   function handleMediaStateChange(detail: { state: 'loading' | 'ready' | 'error' }) {
     currentMediaLoadState = detail.state;
   }
@@ -570,6 +961,20 @@
     {#snippet left()}
 	      <ViewerBrandMenu />
 	      <FeedRouteMenu routeSpec={feedSpec} recipe={feedState?.recipe} options={FEED_OPTIONS} />
+      <FeedSourceManager
+        rows={feedSourceRows}
+        suggestions={feedSourceSuggestions}
+        {sourceSummary}
+        {refilling}
+        actionBusy={sourceActionBusy}
+        message={sourcePanelMessage}
+        onAddSource={addManualSource}
+        onAddSuggestion={addSuggestedSource}
+        onRemoveSource={removeFeedSource}
+        onBanSubreddit={banFeedSource}
+        onRestoreSource={restoreFeedSource}
+        onRefillSources={refillNow}
+      />
       <ProfileScanStatus class="feed-scan-status" />
     {/snippet}
 

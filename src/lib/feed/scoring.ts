@@ -14,6 +14,10 @@ import {
   getFeedSourceLabel,
   getFeedSourceRoutePath,
   getSourceYieldScore,
+  isFeedSourceAvailable,
+  isValidFeedSourceSubredditName,
+  normalizeFeedSourceSubredditList,
+  normalizeSourceSubreddit,
 } from '$lib/feed/source';
 
 export interface FeedCandidate {
@@ -128,6 +132,18 @@ function isRecipeNsfwMatch(post: PostRecord, recipe: FeedRecipe): boolean {
   return post.isNsfw;
 }
 
+function isRecipeSourceAllowed(
+  post: PostRecord,
+  sub: SubredditRecord | undefined,
+  excludedSourceSet: Set<string>
+): boolean {
+  const subreddit = normalizeSourceSubreddit(post.subreddit);
+  if (!isValidFeedSourceSubredditName(subreddit) || excludedSourceSet.has(subreddit) || subreddit === 'all') {
+    return false;
+  }
+  return sub ? isFeedSourceAvailable(sub) : true;
+}
+
 function getSourceRankScore(source: PostSource | undefined): number {
   if (!source || source.listingPosition === undefined) return 0;
   return Math.max(0, 6 - Math.log2(source.listingPosition + 2) * 1.4);
@@ -167,17 +183,19 @@ export function scoreFeedCandidates(context: FeedScoringContext): FeedCandidate[
   const eventsByPost = groupEventsByPost(context.events);
   const sourcesByPost = groupSourcesByPost(context.postSources);
   const statsBySource = new Map(context.sourceStats.map((stats) => [stats.sourceKey, stats]));
+  const excludedSourceSet = new Set(normalizeFeedSourceSubredditList(context.recipe.excludedSourceSubreddits));
 
   return context.posts
     .filter((post) => post.media && !post.isSelf && isRecipeNsfwMatch(post, context.recipe))
     .map((post): FeedCandidate | null => {
       const details: FeedScoreDetail[] = [];
-      const sub = subredditByName.get(post.subreddit);
+      const sub = subredditByName.get(normalizeSourceSubreddit(post.subreddit));
       const source = getCandidateSource(post, context.recipe, sourcesByPost);
       const postEvents = eventsByPost.get(post.id) ?? [];
       let score = 0;
 
       if (!source) return null;
+      if (!isRecipeSourceAllowed(post, sub, excludedSourceSet)) return null;
 
       if (context.seenPostIds.has(post.id)) {
         score += addDetail(details, 'seen', 'seen', 'already viewed', -80, 'negative');

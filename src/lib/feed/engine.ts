@@ -24,6 +24,7 @@ import {
   getFeedSourceLabel,
   getFeedSourcePath,
   getFeedSourceRoutePath,
+  normalizeFeedSourceSubredditList,
 } from '$lib/feed/source';
 import { scoreFeedCandidates } from '$lib/feed/scoring';
 import type { FeedRecipe, FeedRun, FeedRunItem, FetchSpec, PostRecord, SourceStats } from '$lib/types';
@@ -43,6 +44,7 @@ export interface BuildFeedRunOptions {
 export interface RefillFeedSourcesOptions {
   force?: boolean;
   forceNetwork?: boolean;
+  onlySubreddits?: string[];
 }
 
 export interface FeedRefillResult {
@@ -192,7 +194,14 @@ export async function refillFeedSources(
     getAllSourceStats(),
   ]);
   const statsByKey = getSourceStatsMap(sourceStats);
-  const plans = planFeedSourceFetches(subreddits, recipe, sourceStats, [], posts, { force: options.force });
+  const explicitSubreddits = normalizeFeedSourceSubredditList(options.onlySubreddits);
+  const plans = explicitSubreddits.length > 0
+    ? explicitSubreddits.map((subreddit) => ({
+      subreddit,
+      listingSort: recipe.listingSort,
+      listingTime: recipe.listingTime,
+    }))
+    : planFeedSourceFetches(subreddits, recipe, sourceStats, [], posts, { force: options.force });
   const batchId = `${recipe.id}:${Date.now()}`;
   const result: FeedRefillResult = {
     attempted: plans.length,
