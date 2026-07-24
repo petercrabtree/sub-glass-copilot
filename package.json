@@ -14,7 +14,7 @@
 		"smoke:headless": "node scripts/headless-smoke.mjs",
 		"smoke:headless:live": "node scripts/headless-smoke.mjs --reddit-source live",
 		"smoke:headless:loop": "node scripts/headless-smoke.mjs --loop",
-		"smoke:overlay-spike": "node spikes/reddit-overlay/smoke.mjs"
+		"smoke:overlay": "node userscript/smoke.mjs"
 	},
 	"devDependencies": {
 		"@esbuild/win32-x64": "^0.28.0",

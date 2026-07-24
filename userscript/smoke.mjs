@@ -6,9 +6,9 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
 
-const SPIKE_DIR = path.dirname(fileURLToPath(import.meta.url));
-const USER_SCRIPT_PATH = path.join(SPIKE_DIR, 'subglass-reddit-overlay.user.js');
-const SCREENSHOT_PATH = path.join(process.cwd(), 'build', 'overlay-spike-smoke.png');
+const USERSCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const USER_SCRIPT_PATH = path.join(USERSCRIPT_DIR, 'subglass-reddit-overlay.user.js');
+const SCREENSHOT_PATH = path.join(process.cwd(), 'build', 'overlay-v1-smoke.png');
 const CHROME_CANDIDATES = [
   process.env.CHROME_BIN,
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -27,7 +27,7 @@ const listing = {
         data: {
           id: 'spike-image',
           title: 'Overlay spike image',
-          subreddit: 'spike',
+          subreddit: 'spikeone',
           author: 'fixture',
           score: 1200,
           num_comments: 42,
@@ -44,7 +44,7 @@ const listing = {
         data: {
           id: 'spike-video',
           title: 'Overlay spike video',
-          subreddit: 'spike',
+          subreddit: 'spiketwo',
           author: 'fixture',
           score: 980,
           num_comments: 18,
@@ -64,7 +64,7 @@ const listing = {
         data: {
           id: 'spike-gallery',
           title: 'Overlay spike gallery',
-          subreddit: 'spike',
+          subreddit: 'spikeone',
           author: 'fixture',
           score: 760,
           num_comments: 11,
@@ -84,7 +84,7 @@ const listing = {
         data: {
           id: 'spike-self',
           title: 'Unsupported self post',
-          subreddit: 'spike',
+          subreddit: 'spiketwo',
           author: 'fixture',
           permalink: '/r/spike/comments/spike-self/unsupported_self_post/',
           is_self: true,
@@ -95,6 +95,8 @@ const listing = {
     ],
   },
 };
+
+const listingRequests = [];
 
 const svg = (label, color) => `
   <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
@@ -107,7 +109,7 @@ const svg = (label, color) => `
 const server = http.createServer((request, response) => {
   const url = new URL(request.url || '/', 'http://localhost');
 
-  if (url.pathname === '/r/blocked/.json') {
+  if (url.pathname === '/r/blocked+other/.json') {
     response.writeHead(403, {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
@@ -118,6 +120,10 @@ const server = http.createServer((request, response) => {
   }
 
   if (url.pathname.endsWith('/.json')) {
+    listingRequests.push({
+      pathname: url.pathname,
+      search: url.search,
+    });
     response.writeHead(200, {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
@@ -171,19 +177,26 @@ try {
     if (message.type() === 'error') browserErrors.push(new Error(message.text()));
   });
 
-  await page.goto(`${baseUrl}/r/spike/top/?t=month`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${baseUrl}/r/spikeone+spiketwo/top/?t=month`, { waitUntil: 'domcontentloaded' });
   await page.addScriptTag({ path: USER_SCRIPT_PATH });
 
   await clickShadow(page, '[data-role="launcher"]');
   await page.waitForFunction(() => {
-    const host = document.getElementById('subglass-overlay-spike-host');
+    const host = document.getElementById('subglass-reddit-overlay-host');
     return host?.dataset.phase === 'ready' && host.dataset.supportedCount === '3';
   });
 
   assert.equal(await hostDataset(page, 'open'), 'true');
+  assert.equal(await hostDataset(page, 'bundle'), 'spikeone+spiketwo');
+  assert.equal(await hostDataset(page, 'sourceCount'), '2');
   assert.equal(await hostDataset(page, 'currentPostId'), 'spike-image');
+  assert.equal(await shadowValue(page, '[data-role="bundle-input"]'), 'spikeone+spiketwo');
+  assert.equal(await shadowText(page, '[data-role="subreddit-link"]'), 'r/spikeone');
+  assert.equal(listingRequests[0]?.pathname, '/r/spikeone+spiketwo/top/.json');
+  assert.match(listingRequests[0]?.search || '', /[?&]t=month(?:&|$)/);
   const diagnostics = await shadowText(page, '[data-role="diagnostics"]');
   assert.match(diagnostics, /HTTP 200/);
+  assert.match(diagnostics, /2 subreddits/);
   assert.match(diagnostics, /3\/4 media posts/);
   assert.match(
     diagnostics,
@@ -206,25 +219,59 @@ try {
   await page.keyboard.press('ArrowRight');
   assert.equal(await hostDataset(page, 'currentMediaIndex'), '1');
 
-  await page.evaluate(() => history.pushState({}, '', '/r/another/new/'));
+  await submitShadowFeed(page, 'Alpha+beta+ALPHA', 'new', 'all');
   await page.waitForFunction(() => {
-    const host = document.getElementById('subglass-overlay-spike-host');
-    return host?.dataset.phase === 'ready' && host.dataset.routeKey.includes('/r/another/new/.json');
+    const host = document.getElementById('subglass-reddit-overlay-host');
+    return host?.dataset.phase === 'ready' && host.dataset.routeKey.includes('/r/Alpha+beta/new/.json');
+  });
+  assert.equal(await hostDataset(page, 'bundle'), 'Alpha+beta');
+  assert.equal(await hostDataset(page, 'sourceCount'), '2');
+  assert.equal(await shadowValue(page, '[data-role="bundle-input"]'), 'Alpha+beta');
+  assert.equal(
+    await page.evaluate(() => JSON.parse(localStorage.getItem('subglass:reddit-overlay-v1-feed')).bundle),
+    'Alpha+beta',
+    'a custom multi-subreddit feed should persist for a reload of the same Reddit page',
+  );
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.addScriptTag({ path: USER_SCRIPT_PATH });
+  await clickShadow(page, '[data-role="launcher"]');
+  await page.waitForFunction(() => {
+    const host = document.getElementById('subglass-reddit-overlay-host');
+    return host?.dataset.phase === 'ready' && host.dataset.routeKey.includes('/r/Alpha+beta/new/.json');
+  });
+  assert.equal(await hostDataset(page, 'bundle'), 'Alpha+beta');
+  assert.equal(await shadowValue(page, '[data-role="bundle-input"]'), 'Alpha+beta');
+
+  const requestsBeforeInvalidSubmit = listingRequests.length;
+  await submitShadowFeed(page, 'pics+bad-name', 'new', 'month');
+  await page.waitForFunction(() => {
+    const host = document.getElementById('subglass-reddit-overlay-host');
+    return host?.shadowRoot.querySelector('[data-role="bundle-input"]').getAttribute('aria-invalid') === 'true';
+  });
+  assert.equal(listingRequests.length, requestsBeforeInvalidSubmit);
+  assert.match(await shadowText(page, '[data-role="diagnostics"]'), /Invalid subreddit "bad-name"/);
+
+  await page.evaluate(() => history.pushState({}, '', '/r/another+third/new/'));
+  await page.waitForFunction(() => {
+    const host = document.getElementById('subglass-reddit-overlay-host');
+    return host?.dataset.phase === 'ready' && host.dataset.routeKey.includes('/r/another+third/new/.json');
   });
 
+  assert.equal(await hostDataset(page, 'bundle'), 'another+third');
   assert.ok(
-    (await shadowText(page, '[data-role="route"]')).includes('r/another · new'),
-    'client-side route changes should refresh the overlay context',
+    (await shadowText(page, '[data-role="route"]')).includes('r/another+third · new'),
+    'client-side route changes should refresh a multi-subreddit overlay context',
   );
 
   await mkdir(path.dirname(SCREENSHOT_PATH), { recursive: true });
   await page.screenshot({ path: SCREENSHOT_PATH, fullPage: true });
   assert.deepEqual(browserErrors, []);
 
-  await page.evaluate(() => history.pushState({}, '', '/r/blocked/'));
+  await page.evaluate(() => history.pushState({}, '', '/r/blocked+other/'));
   await page.waitForFunction(() => {
-    const host = document.getElementById('subglass-overlay-spike-host');
-    return host?.dataset.phase === 'error' && host.dataset.routeKey.includes('/r/blocked/.json');
+    const host = document.getElementById('subglass-reddit-overlay-host');
+    return host?.dataset.phase === 'error' && host.dataset.routeKey.includes('/r/blocked+other/.json');
   });
   assert.match(await shadowText(page, '[data-role="diagnostics"]'), /HTTP 403/);
   assert.match(await shadowText(page, '[data-role="empty"]'), /Fixture access denied/);
@@ -251,10 +298,12 @@ try {
     'closing the overlay should restore page scrolling',
   );
 
-  console.log('PASS overlay mounts in an isolated shadow root');
+  console.log('PASS v1 overlay mounts in an isolated shadow root');
+  console.log('PASS multi-subreddit URL parsing, editing, normalization, and persistence work');
   console.log('PASS same-origin credentialed listing fetch renders image, video, and gallery media');
   console.log('PASS unsupported posts are filtered and HTTP failures remain visible');
-  console.log('PASS keyboard navigation and client-side route refresh work');
+  console.log('PASS invalid bundles are rejected before fetch and client-side route refresh works');
+  console.log('PASS keyboard navigation works');
   console.log('PASS closing restores the untouched host page');
   console.log(`Screenshot: ${SCREENSHOT_PATH}`);
 } finally {
@@ -287,20 +336,38 @@ async function findChrome() {
       // Try the next candidate.
     }
   }
-  throw new Error('Chrome was not found. Set CHROME_BIN to run the overlay spike smoke test.');
+  throw new Error('Chrome was not found. Set CHROME_BIN to run the overlay v1 smoke test.');
 }
 
 async function clickShadow(page, selector) {
   await page.$eval(
-    '#subglass-overlay-spike-host',
+    '#subglass-reddit-overlay-host',
     (element, shadowSelector) => element.shadowRoot.querySelector(shadowSelector).click(),
     selector,
   );
 }
 
+async function submitShadowFeed(page, bundle, sort, time) {
+  await page.$eval(
+    '#subglass-reddit-overlay-host',
+    (element, values) => {
+      const root = element.shadowRoot;
+      const bundleInput = root.querySelector('[data-role="bundle-input"]');
+      const sortSelect = root.querySelector('[data-role="sort-select"]');
+      const timeSelect = root.querySelector('[data-role="time-select"]');
+      bundleInput.value = values.bundle;
+      sortSelect.value = values.sort;
+      sortSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      timeSelect.value = values.time;
+      root.querySelector('[data-role="feed-form"]').requestSubmit();
+    },
+    { bundle, sort, time },
+  );
+}
+
 async function hostDataset(page, key) {
   return page.$eval(
-    '#subglass-overlay-spike-host',
+    '#subglass-reddit-overlay-host',
     (element, datasetKey) => element.dataset[datasetKey],
     key,
   );
@@ -308,15 +375,23 @@ async function hostDataset(page, key) {
 
 async function shadowText(page, selector) {
   return page.$eval(
-    '#subglass-overlay-spike-host',
+    '#subglass-reddit-overlay-host',
     (element, shadowSelector) => element.shadowRoot.querySelector(shadowSelector).textContent,
+    selector,
+  );
+}
+
+async function shadowValue(page, selector) {
+  return page.$eval(
+    '#subglass-reddit-overlay-host',
+    (element, shadowSelector) => element.shadowRoot.querySelector(shadowSelector).value,
     selector,
   );
 }
 
 async function shadowTagName(page, selector) {
   return page.$eval(
-    '#subglass-overlay-spike-host',
+    '#subglass-reddit-overlay-host',
     (element, shadowSelector) => element.shadowRoot.querySelector(shadowSelector).tagName,
     selector,
   );
