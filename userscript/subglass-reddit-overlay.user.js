@@ -1,8 +1,12 @@
 // ==UserScript==
 // @name         SubGlass Reddit Overlay
 // @namespace    https://github.com/subglass
-// @version      1.0.0
+// @version      1.0.1
 // @description  A same-origin media viewer for Reddit and multi-subreddit listings.
+// @homepageURL  https://github.com/petercrabtree/sub-glass-copilot
+// @supportURL   https://github.com/petercrabtree/sub-glass-copilot/issues
+// @updateURL    https://raw.githubusercontent.com/petercrabtree/sub-glass-copilot/main/userscript/subglass-reddit-overlay.user.js
+// @downloadURL  https://raw.githubusercontent.com/petercrabtree/sub-glass-copilot/main/userscript/subglass-reddit-overlay.user.js
 // @match        https://www.reddit.com/*
 // @match        https://old.reddit.com/*
 // @match        https://new.reddit.com/*
@@ -14,7 +18,7 @@
   'use strict';
 
   const HOST_ID = 'subglass-reddit-overlay-host';
-  const SCRIPT_VERSION = '1.0.0';
+  const SCRIPT_VERSION = '1.0.1';
   const STORAGE_KEY = 'subglass:reddit-overlay-v1-feed';
   const ROUTE_POLL_MS = 750;
   const LISTING_LIMIT = 50;
